@@ -1,0 +1,3871 @@
+# 人脸支付
+
+这里其实是有两个方向，一个是项目初期，一个是项目中或迭代，项目初期我们是需要进行模型训练关键点的，但是现在的社会发展情况其实是可以使用预训练模型或者迁移学习来实现这一个步骤，所以我们会按两个思路来进行实现和记录
+
+### 1.实现流程
+
+这个其实是很简单来实现和理解
+
+1. 人脸检测（首先将人脸先检测出来，方便后面的处理，这里我们有两个热点算法可以选择，一个是 yolo家族，一个是 Fsater-RCNN家族）
+2. 人脸姿态（主要是对人脸的角度关键点进行检测，防止角度问题影响后面的关键点提取和关键点匹配）
+3. 人脸多任务（主要是对人脸的特征进行处理，比如性别，年龄等等特征点，将这些关键点提取处理方便后面进行匹配识别）
+4. 人脸识别（主要是将人脸的数据进行特征向量化，接着和数据集进行比对）
+
+这里我们主要介绍从0开始搭建的，但是我们还是会提一下现存的技术和框架来简单实现这个
+
+**首先是我们从0start**
+
+1. 人脸检测（yolov5/8处理的性能好，fsater-rcnn主要是对密集型检测好）
+2. 人脸姿态（残差网格 resnet）
+3. 人脸多任务（残差网格 resnet）
+4. 人脸识别（arcface网格算法）
+
+**其次是我们成熟的框架**
+
+1. mediapipes（其实一个框架就可以实现人体相关各种关键点的检测和匹配）
+2. ultralytics （这个也是可以直接实现的）
+
+
+
+### 2.流程分析
+
+#### 2.1 人脸检测任务
+
+##### 2.1.0 从训练模型开始
+
+1. 数据的准备（一般是数据集，标注信息的准备，还是数据进行预处理，这个步骤其实是非常庞大的工程，我们可以去一些网站先寻找）
+2. 模型构建（这里主要是选择适合算法，适合的网格架构，超参数的设置）
+3. 模型训练（这个主要就是训练，将数据交给模型训练）
+4. 模型测试/模型
+
+##### 2.1.1 数据加载
+
+首先是需要确定我们需要什么数据和数据格式，数据集的数量。处理自己自己准备数据还是非常麻烦的，所以我们还有两种方法
+
+1. 自己准备，自己标注
+2. 使用预训练模型（我们使用少量的数据就可以训练）
+3. 第三方数据源
+
+**预训练模型**我们可以直接追踪 GitHub
+
+**第三方数据源：**
+
+- kaggle：这个起源是数据网站，主要是机器学习权威的网站，现在也是有不少的深度学习的数据集的 https://www.kaggle.com/
+- archive：这个是美国加州大学开源的数据集网站 [Home - UCI Machine Learning Repository](https://archive.ics.uci.edu/)
+- pexels：这个不是我们视觉意义的数据源网站，是一个图片免费的图片源  https://www.pexels.com/
+- roboflow：这个网站不仅提供简单的数据集，还提供对应的标注的数据，对于识别检测，语义分割是好网站  https://public.roboflow.com/
+- googleapis：这个是谷歌开源的数据源，里面的分类数目是非常多的，不过比较大，所以不可以直接下载 https://storage.googleapis.com/
+- vecteezy：这个主要是提供单个的图片，视频等数据，对于我们测试/展示模型的训练结果是非常好的数据源  https://www.vecteezy.com/
+
+**标注网站**：[Leading Image & Video Data Annotation Platform | CVAT](https://www.cvat.ai/)
+
+说完数据来源的处理我们就需要说一下我们这个项目的数据相关的东西了
+
+图片数据存储目录地址：datasets/yolo_widerface_open_train/anno/images
+
+标注数据存储目录地址：datasets/yolo_widerface_open_train/anno/labels
+
+图片文件的目录地址：datasets/yolo_widerface_open_train/anno/train.txt
+
+![1762922231379](face-recognition\1)
+
+我们的标注数据格式如下
+
+```txt
+0 0.103515625 0.4489795918367347 0.11328125 0.2099125364431487
+0 0.369140625 0.27988338192419826 0.0859375 0.1749271137026239
+0 0.7431640625 0.23469387755102042 0.107421875 0.15451895043731778
+0 0.5361328125 0.575801749271137 0.091796875 0.17201166180758018
+0 0.8779296875 0.5889212827988338 0.103515625 0.18658892128279883
+```
+
+- 列1：类别ID(因为这里我们是人脸识别，所以所有的分类都是0，也就是0)
+- 列2：归一化后的标准框的中心点的X坐标
+- 列3：归一化后的标准框的中心点的Y坐标
+- 列4：归一化后的标准框的宽度W
+- 列5：归一化后的标准框的高度H
+
+**这里的解惑点：为什么不使用OS直接读 images**
+
+因为直接读是将所有的图片数据放在内存区，考虑到内存问题防止溢出问题，我们使用另外一个文件保存文件目录，这样我们就可以按需导入数据
+
+**这里的解惑点：如何保证标注点和图片的准确性**
+
+这里我们可以加载这些数据进行展示
+
+1.加载数据
+
+```python
+    # 获取所有的图像文件
+    with open(path, 'r') as file:
+        img_files = file.read().splitlines()
+        img_files = list(filter(lambda x: len(x) > 0, img_files))
+    # 获取所有的标注文件(因为图片数据和标注数据是一一对应的，所有我们这里只需要将目录和文件后缀进行修改就可以获取到图片的对应标注信息数据)
+    label_files = [
+        x.replace('images', 'labels').replace('.jpg','.txt')
+        for x in img_files]
+```
+
+2.将标注信息绘制在图像上进行展示
+
+```python
+    # 读取图像并对标注信息进行绘制，这里因为源数据非常大，所以我们只使用小部分进行展示
+    # for i in range(len(img_files)):
+    for i in range(1000):
+        # 获取图像文件
+        img_file = os.path.join(root_path, img_files[i][2:]) #这里主要是忽略图片文件目录前面的 ./ 进行绝对路径的拼接
+        img = cv2.imread(img_file)
+        w = img.shape[1]
+        h = img.shape[0]
+        # 标注文件
+        lable_path = os.path.join(root_path, label_files[i][2:]) # 这个同理
+        # 读取标注绘制在图像上
+        if os.path.isfile(lable_path):
+            with open(lable_path, 'r') as file:
+                lines = file.read().splitlines()
+            x = np.array([x.split() for x in lines], dtype=np.float32) # 将标注信息转成 np数组
+            for k in range(len(x)): #遍历标注信息，因为一张图片可能有多个人脸框的标注信息，所以我们需要进行遍历
+                anno = x[k]
+                label = int(anno[0]) # 标签
+                # 通过这个操作将标准框的左上角的坐标拿出来
+                x1 = int((float(anno[1]) - float(anno[3]) / 2) * w) # (x - 标注w/2)*图片w 这个公式将中心点的x坐标进行上移到上边框
+                y1 = int((float(anno[2]) - float(anno[4]) / 2) * h) # (y - 标注h/2)*图片h 这个公式将中心点的y坐标进行左移到左边框
+
+                # 通过这个操作将标准框的右下角的坐标拿出来
+                x2 = int((float(anno[1]) + float(anno[3]) / 2) * w)
+                y2 = int((float(anno[2]) + float(anno[4]) / 2) * h)
+                
+                # 在标注框的左上角上边打上标签信息
+                cv2.putText(img, ("%s" % (str(label))), (x1, y1), \
+                            cv2.FONT_HERSHEY_PLAIN, 2.5, (0, 55, 255), 2)
+                
+                # 绘制一个宽度为2的矩形(只需要对角的坐标就可以)
+                cv2.rectangle(img,(x1,y1),(x2,y2),(255,20,20),2)
+        cv2.imshow('image',img)
+        cv2.waitKey(0)
+    cv2.destroyAllWindows()
+```
+
+![2](face-recognition\2.png)
+
+在训练的时候我们只需要将一些配置信息准备好就可以，而对于数据加载的需要的相关配置的目录在 facetoPay/yolo_v5/data/face.yaml
+
+![3](face-recognition\3.png)
+
+主要是以下的相关的配置
+
+```yaml
+# 人脸检测数据信息配置
+# 数据存放路径的配置
+#path: /home/02-data/yolo_widerface_open_train/anno  # 根目录
+path: /Users/mac/Documents/02.计算机视觉/03.人脸支付/02.code/datasets/yolo_widerface_open_train/anno  # 根目录
+train: images  # 训练集数据的目录（根目录的相对路经）
+val: images  # 验证集数据的目录（根目录的相对路经），在这里验证集和训练集是同一个
+test:  # 测试集，可选
+
+# 数据集的类型信息：在这里我们只检测人脸这一种类型的目标
+nc: 1  # 类别个数
+names: ['face'] # 类别名称
+
+```
+
+**除了这个，我们还有一个非常可以使用的点，就是数据增强，不过这个我们只需要区关注他的配置信息就好**
+
+目录位置：facetoPay/yolo_v5/data/hyps/hyp.scratch-face.yaml
+
+![3](D:\md\face-recognition\3.png)
+
+```yaml
+fl_gamma: 0.0  # gmma变换的系数，用于图像均衡
+hsv_h: 0.015  # H通道增强的比例 (fraction)
+hsv_s: 0.7  # S通道增强的比例 (fraction)
+hsv_v: 0.4  # V通道增强的比例(fraction)
+degrees: 40  # 图像旋转的角度 (+/- deg)
+translate: 0.0  # 图像平移的比例(+/- fraction)
+scale: 0.5  # 图像缩放的大小(+/- gain)
+perspective: 0.0  # 图像透视变换的比例 (+/- fraction), range 0-0.001
+flipud: 0.0  # 上下翻转 (probability)
+fliplr: 0.5  # 左右翻转 (probability)
+mosaic: 0.0  # 图像马赛克 (probability)
+mixup: 0.0  # 图像混合 (probability)
+```
+
+
+
+##### 2.1.2 模型构建（yolov8）
+
+首先我们肯定需要复习下他的算法网格结构
+
+![4](D:\md\face-recognition\4.png)
+
+yolov5算法没有使用池化层和全连接层来进行下采样，而是使用步伐 stride为2来实现
+
+**我们主要是四大卷积模块组成**
+
+1. CBS模块：主要是进行特征提取
+2. Res unit模块：残差模块主要是防梯度消失和性能下降
+3. CSP模块：主要加快提取效率，2主要是应用轻量级场景
+4. SPFF模块：主要是进行空间多角度特征提取
+
+**CBS模块**
+
+这个是 yolov5的基础模块单元用来卷积进行特征提取和变化，BN（批量归一化）主要是使网络更加稳定，SiLU非线性激活函数主要是增加特征的表达能力
+
+![](face-recognition\5.png)
+
+```python
+# 卷积模块：使用的是silu激活函数，相对于relu更平滑
+class Conv(nn.Module):
+    # 输入特征图的通道数ch_in, 输出特征图的通道数ch_out, 卷积核大小, 步长stride, 填充padding
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):  
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p), groups=g, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
+        # 前向传播过程
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+```
+
+**Resunit模块**
+
+残差单元。是残差网格 ResNet的核心组件，主要功能解决 **深层网格训练中梯度消失和性能退化问题**（加入X输入的时候通过卷积导致特征消失，我们还有X来加上我们卷积后的数据从而保留了可能消失的特征）
+
+
+
+![](face-recognition\6.png)
+
+```python
+# resunit模块
+class Bottleneck(nn.Module):
+    # 输入特征图的通道数c1, 输出特征图的通道数c2, shortcut是否进行短连接，e表示中间的通道数
+    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5): 
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_, c2, 3, 1, g=g)
+        self.add = shortcut and c1 == c2
+        # 前向传播过程
+    def forward(self, x):
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+```
+
+**CSP模块**
+
+CSP模块是为了 **减少计算量、增强特征表达、缓解梯度消失** （将输入特征分成两部分，一部分经过复杂变换，另一部分直接保留，最后拼接融合，这样就可以价内税计算量），它里面的CBS和Resunit模块我们上面已经介绍过了所以我们这里主要介绍下 Concat模块的作用，将两个输入的特征数据进行通道相加，这样可以 **融合不同分支的特征信息，增强表达能力**。但是我们有两种CSP模块
+
+- CSP1_X：借助 Res unit 的残差特性，在深层网络中更稳定
+- CSP2_X：通过多轮普通卷积简化结构，在轻量化场景更具优势。这种设计让网络在目标检测等任务中，既能保证检测精度，又能降低推理时间和计算成本
+
+![](face-recognition\7.png)
+
+```python
+# C3 backbone和neck部分的CSP模块，shortcut控制是否包含短连接
+class C3(nn.Module):
+    # 输入端特征图通道数c1, 输出端特征图通道数c2, Resunit重复的次数, 是否添加短连接shortcut
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  
+        super().__init__()
+        # 中间部分的通道数
+        c_ = int(c2 * e)  
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  
+        # 根据重复次数添加相应的resunit或者是两个cbs
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
+    # 前向传播过程
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+```
+
+**SPPF模块**
+
+这个模块主要是为了 **增强特征的多尺度表达能力**（因为除了X会参加拼接，每个深度的最大池化都会参加拼接），同时**大幅降低计算开销 **（池化操作计算比卷积计算速度快）,里面的最大池化层主要是不同空间尺度的特征提取
+
+![](face-recognition\8.png)
+
+```python
+# SPPF模块的构成
+class SPPF(nn.Module):
+    # 输入端特征图的通道数c1,输出端特征图的通道数c2,池化窗口的大小5
+    def __init__(self, c1, c2, k=5): 
+        super().__init__()
+        # 中间部分的特征图通道数
+        c_ = c1 // 2  
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_ * 4, c2, 1, 1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        # 前向传播过程
+    def forward(self, x):
+        x = self.cv1(x)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')  # suppress torch 1.9.0 max_pool2d() warning
+            y1 = self.m(x)
+            y2 = self.m(y1)
+            return self.cv2(torch.cat([x, y1, y2, self.m(y2)], 1))
+```
+
+**网格的输出端**
+
+yolov5一共有9个anchor，3个输出（选择置信度最大的三个 anchor）
+
+![](face-recognition\9.png)
+
+```python
+# 模型的输出端
+class Detect(nn.Module):
+    stride = None  # strides computed during build
+    onnx_dynamic = False  # ONNX export parameter
+        # 目标类别个数nc,anchors,输入数据的通道数ch,是否进行内存复用inplace
+    def __init__(self, nc=80, anchors=(), ch=(), inplace=True):  
+        super().__init__()
+        self.nc = nc  # 类别个数
+        self.no = nc + 5  # 每个anchor输出数据的维度
+        self.nl = len(anchors)  # anchors分布在多少个特征图上
+        self.na = len(anchors[0]) // 2  # anchor的个数
+        self.grid = [torch.zeros(1)] * self.nl  # 网格初始化
+        self.anchor_grid = [torch.zeros(1)] * self.nl  # 初始化anchor所在的网格坐标
+        self.register_buffer('anchors', torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # 输出部分的卷积
+        self.inplace = inplace  # 内存复用
+        # 前向传播
+    def forward(self, x):
+        z = []  # 预测的输出
+        for i in range(self.nl):
+            x[i] = self.m[i](x[i])  # 卷积
+            bs, _, ny, nx = x[i].shape  # 进行输出结果维度的调整x(bs,255,20,20) to x(bs,3,20,20,85)
+            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+                        # 推理预测阶段的输出
+            if not self.training:  
+                if self.onnx_dynamic or self.grid[i].shape[2:4] != x[i].shape[2:4]:
+                    self.grid[i], self.anchor_grid[i] = self._make_grid(nx, ny, i)
+                                # 每一个输出添加sigmiod激活函数
+                y = x[i].sigmoid()
+                # 中心点坐标和宽高的处理方式
+                if self.inplace:
+                    y[..., 0:2] = (y[..., 0:2] * 2 - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                    y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+                else:  
+                    xy = (y[..., 0:2] * 2 - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                    wh = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+                    y = torch.cat((xy, wh, y[..., 4:]), -1)
+                # 预测时将各个尺度的输出结果拼接在一起
+                z.append(y.view(bs, -1, self.no))
+                # 返回结果：
+        # 训练时返回各个尺度的输出结果
+        # 预测时返回各个尺度的输出结果和拼接之后的结果
+        return x if self.training else (torch.cat(z, 1), x)
+```
+
+**网格搭建**
+
+上面我已经介绍了我们四大模块和输出端，这个时候我们就需要将这些网格进行拼接，这个时候我们使用配置文件来拼接（可视性更好），配置文件目录：yolo_v5/models/yolov5s.yaml
+
+![](face-recognition\10.png)
+
+```yaml
+# 模型参数
+nc: 1  # 类别个数
+# 不同大小的模型只要配置这两个参数即可
+depth_multiple: 0.33  # 模型深度的比例，即网络层数的比例
+width_multiple: 0.50  # 模型宽度的比例，即网络每一层深度的比例
+# anchor的设置，与yoloV3是一样的
+anchors:
+  - [ 10,13, 16,30, 33,23 ]  # P3/8
+  - [ 30,61, 62,45, 59,119 ]  # P4/16
+  - [ 116,90, 156,198, 373,326 ]  # P5/32
+
+# 在配置文件中将模型结果分为backbone和head两部分：
+# backbone指特征提取部分，以列表的形式进行配置
+backbone:
+  # [from, number, module, args]
+  #  from 表示该层的输入从哪来。-1表示输入取自上一层，-2表示上两层，3表示第3层（从0开始数），[-1, 4]表示取自上一层和第4层，依次类推。。。
+  #  从0开始，每一行表示一层，例如0-P1/2表示第0层，特征图尺寸为输入的1/2。
+  #  number 表示该层模块堆叠的次数，最终的次数还要乘上depth_multiple系数。
+  #  module 表示该层的模块。Conv表示卷积+BN+激活模块。C3表示csp1_x结构。
+  #  args 表示输入到模块的参数。例如Conv：[128, 3, 2] 表示输出通道128，卷积核尺寸3，stride=2；C3模块：[1024],表示通道数为1024；
+  #  SPPF模块：[ 1024, 5 ]表示输出通道数为1025，池化窗口为5。最终的输出通道数还要乘上 width_multiple，
+  [ [ -1, 1, Conv, [ 64, 6, 2, 2 ] ],  # 0-P1/2
+    [ -1, 1, Conv, [ 128, 3, 2 ] ],  # 1-P2/4
+    [ -1, 3, C3, [ 128 ] ],
+    [ -1, 1, Conv, [ 256, 3, 2 ] ],  # 3-P3/8
+    [ -1, 6, C3, [ 256 ] ],
+    [ -1, 1, Conv, [ 512, 3, 2 ] ],  # 5-P4/16
+    [ -1, 9, C3, [ 512 ] ],
+    [ -1, 1, Conv, [ 1024, 3, 2 ] ],  # 7-P5/32
+    [ -1, 3, C3, [ 1024 ] ],
+    [ -1, 1, SPPF, [ 1024, 5 ] ],  # 9
+  ]
+
+# head指neck和output两部分，以列表的形式进行配置，每个模块的配置与backbone中是一样的。
+head:
+
+  [ [ -1, 1, Conv, [ 512, 1, 1 ] ],
+    [ -1, 1, nn.Upsample, [ None, 2, 'nearest' ] ], # nn.Upsample模块的参数[ None, 2, 'nearest' ] None表示通道数与输入通道相同，2表示上采样倍数，'nearest'表示差值方法
+    [ [ -1, 6 ], 1, Concat, [ 1 ] ],  # 表示上一层输出与第6层输出进行concat融合，最后[ 1 ]表示特征图的长宽不发生变化
+    [ -1, 3, C3, [ 512, False ] ],  # 13
+
+    [ -1, 1, Conv, [ 256, 1, 1 ] ],
+    [ -1, 1, nn.Upsample, [ None, 2, 'nearest' ] ],
+    [ [ -1, 4 ], 1, Concat, [ 1 ] ],  # cat backbone P3
+    [ -1, 3, C3, [ 256, False ] ],  # 17 (P3/8-small) 表示csp2_3, 256表示通道数，False表示不使用残差模块
+
+    [ -1, 1, Conv, [ 256, 3, 2 ] ],
+    [ [ -1, 14 ], 1, Concat, [ 1 ] ],  # cat head P4
+    [ -1, 3, C3, [ 512, False ] ],  # 20 (P4/16-medium)
+
+    [ -1, 1, Conv, [ 512, 3, 2 ] ],
+    [ [ -1, 10 ], 1, Concat, [ 1 ] ],  # cat head P5
+    [ -1, 3, C3, [ 1024, False ] ],  # 23 (P5/32-large)
+
+    [ [ 17, 20, 23 ], 1, Detect, [ nc, anchors ] ],  # Detect(P3, P4, P5) 输出层设置：【17，20，23】表示输入层，nc表示类别个数，anchors表示anchor的设置
+  ]
+
+```
+
+**模型测试**
+
+```python
+# 导入相关的工具包
+from models.yolo import Model
+import torch
+import numpy as np
+
+# 模型配置信息
+cfg = '/Users/mac/Documents/02.计算机视觉/03.人脸支付/02.code/facetoPay/yolo_v5/models/yolov5s.yaml'
+# 模型实例化
+model = Model(cfg, ch=3, nc=1)
+print(model)
+```
+
+```
+                from  n    params  module                                  arguments                     
+  0                -1  1      3520  models.common.Conv                      [3, 32, 6, 2, 2]              
+  1                -1  1     18560  models.common.Conv                      [32, 64, 3, 2]                
+  2                -1  1     18816  models.common.C3                        [64, 64, 1]                   
+  3                -1  1     73984  models.common.Conv                      [64, 128, 3, 2]               
+  4                -1  2    115712  models.common.C3                        [128, 128, 2]                 
+  5                -1  1    295424  models.common.Conv                      [128, 256, 3, 2]              
+  6                -1  3    625152  models.common.C3                        [256, 256, 3]                 
+  7                -1  1   1180672  models.common.Conv                      [256, 512, 3, 2]              
+  8                -1  1   1182720  models.common.C3                        [512, 512, 1]                 
+  9                -1  1    656896  models.common.SPPF                      [512, 512, 5]                 
+ 10                -1  1    131584  models.common.Conv                      [512, 256, 1, 1]              
+ 11                -1  1         0  torch.nn.modules.upsampling.Upsample    [None, 2, 'nearest']          
+ 12           [-1, 6]  1         0  models.common.Concat                    [1]                           
+ 13                -1  1    361984  models.common.C3                        [512, 256, 1, False]          
+ 14                -1  1     33024  models.common.Conv                      [256, 128, 1, 1]              
+ 15                -1  1         0  torch.nn.modules.upsampling.Upsample    [None, 2, 'nearest']          
+ 16           [-1, 4]  1         0  models.common.Concat                    [1]                           
+ 17                -1  1     90880  models.common.C3                        [256, 128, 1, False]          
+ 18                -1  1    147712  models.common.Conv                      [128, 128, 3, 2]              
+ 19          [-1, 14]  1         0  models.common.Concat                    [1]                           
+ 20                -1  1    296448  models.common.C3                        [256, 256, 1, False]          
+ 21                -1  1    590336  models.common.Conv                      [256, 256, 3, 2]              
+ 22          [-1, 10]  1         0  models.common.Concat                    [1]                           
+ 23                -1  1   1182720  models.common.C3                        [512, 512, 1, False]          
+ 24      [17, 20, 23]  1     16182  models.yolo.Detect                      [1, [[10, 13, 16, 30, 33, 23], [30, 61, 62, 45, 59, 119], [116, 90, 156, 198, 373, 326]], [128, 256, 512]]
+Model Summary: 270 layers, 7022326 parameters, 7022326 gradients, 15.8 GFLOPs
+```
+
+
+
+##### 2.1.3 模型训练
+
+我们的训练目录在：facetoPay/yolo_v5/train.py
+
+![](face-recognition\11.png)
+
+这个文件的代码量很大，但是如果我们只关注训练这个结果的话，我们不用关注代码的编写，而是去调整他的超参数设置
+
+```python
+def parse_opt(known=False):
+    parser = argparse.ArgumentParser()
+    # 模型权重
+    parser.add_argument('--weights', type=str, default=ROOT / 'yolov5s.pt', help='initial weights path')
+    # 模型结构的配置文件
+    parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
+    # 数据信息的配置文件
+    parser.add_argument('--data', type=str, default=ROOT / 'data/face.yaml', help='dataset.yaml path')
+    # 超参数的配置文件
+    parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-face.yaml', help='hyperparameters path')
+    # 训练的轮次
+    parser.add_argument('--epochs', type=int, default=3)
+    # batch_size的大小
+    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
+    # 图像大小
+    parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
+    # 矩形训练，保证每个batch中图像大小是一样的
+    parser.add_argument('--rect', action='store_true', help='rectangular training')
+    # 恢复最近保存的模型进行训练
+    parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
+    # 只保存最后一个轮次训练的模型
+    parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
+    # 只验证最后一个轮次的模型结果
+    parser.add_argument('--noval', action='store_true', help='only validate final epoch')
+    # 是否自动聚类anchor
+    parser.add_argument('--noautoanchor', action='store_true', help='disable AutoAnchor')
+    # 是否使用进化超参数
+    parser.add_argument('--evolve', type=int, nargs='?', const=10, help='evolve hyperparameters for x generations')
+    # 从云盘下载资料
+    parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
+    # 是否对图片进行缓存，保证更好的训练速度
+    parser.add_argument('--cache', type=str, nargs='?', const='ram', help='--cache images in "ram" (default) or "disk"')
+    # 是否进行困难样本训练
+    parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
+    # 设备信息
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    # 多尺度训练
+    parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
+    # 单类别训练：检测是否有目标
+    parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
+    # 优化器设置
+    parser.add_argument('--optimizer', type=str, choices=['SGD', 'Adam', 'AdamW'], default='SGD', help='optimizer')
+    # 并行化训练是否同步BN层
+    parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
+    # 数据加载时的线程数
+    parser.add_argument('--workers', type=int, default=8, help='max dataloader workers (per RANK in DDP mode)')
+    # 训练信息的保存路径
+    parser.add_argument('--project', default=ROOT / 'runs/train', help='save to project/name')
+    parser.add_argument('--name', default='exp', help='save to project/name')
+    # 是否创建新的文件夹保存训练的内容
+    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    # 四元数据加载器：将批次16x3x640x640 重塑为 4x3x1280x1280进行网络训练
+    parser.add_argument('--quad', action='store_true', help='quad dataloader')
+    # cos形式的学习率衰减
+    parser.add_argument('--cos-lr', action='store_true', help='cosine LR scheduler')
+    # 标签平滑处理
+    parser.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing epsilon')
+    # 提前停止
+    parser.add_argument('--patience', type=int, default=100, help='EarlyStopping patience (epochs without improvement)')
+    # 参数冻结
+    parser.add_argument('--freeze', nargs='+', type=int, default=[0], help='Freeze layers: backbone=10, first3=0 1 2')
+    # 每多少个轮次保存参数
+    parser.add_argument('--save-period', type=int, default=-1, help='Save checkpoint every x epochs (disabled if < 1)')
+    # 并行训练，不可修改，pytorch会根据硬件信息进行设置
+    parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
+
+    # 这几个参数不管，是wandb库参数，Weights & Biases arguments
+    parser.add_argument('--entity', default=None, help='W&B: Entity')
+    parser.add_argument('--upload_dataset', nargs='?', const=True, default=False, help='W&B: Upload data, "val" option')
+    parser.add_argument('--bbox_interval', type=int, default=-1, help='W&B: Set bounding-box image logging interval')
+    parser.add_argument('--artifact_alias', type=str, default='latest', help='W&B: Version of dataset artifact to use')
+    # 将参数转换为字典的形式并进行返回
+    opt = parser.parse_known_args()[0] if known else parser.parse_args()
+    return opt
+```
+
+我们其实主要关注前面几个设置就好
+
+- 预训练模型权重位置
+- 模型结构文件位置
+- 数据源位置
+- 超参数配置
+
+其他的配置我们使用默认就可以，不会很影响我们模型的训练
+
+**模型训练策略（主要是对输出端进行修改）**
+
+在模型结构的配置文件里面我们就已经声明了 anchor相关的配置
+
+```yaml
+anchors:
+  - [ 10,13, 16,30, 33,23 ]  # P3/8
+  - [ 30,61, 62,45, 59,119 ]  # P4/16
+  - [ 116,90, 156,198, 373,326 ]  # P5/32
+```
+
+**学习率预热**
+
+学习率预热就是在刚开始训练的时候先使用较小的学习率，训练一些epoches或iterations，等模型稳定时再修改为预先设置的学习率进行训练。由于刚开始训练时模型的权重(weights)是随机初始化的，此时选择一个较大的学习率，可能会带来模型的不稳定
+
+对于这个的配置，配置文件目录：facetoPay/yolo_v5/data/hyps/hyp.scratch-face.yaml
+
+```python
+warmup_epochs: 3.0  # 学习率预热的轮次 (fractions ok)
+warmup_momentum: 0.8  # 预测阶段的momentum
+warmup_bias_lr: 0.1  # 预热阶段偏置的学习率初始值
+```
+
+**学习率衰减**
+
+![](face-recognition\12.png)
+
+**我们的训练结果存放在目录：facetoPay/yolo_v5/runs/train/exp**
+
+![](face-recognition\13.png)
+
+**我们训练的模型在 weights目录下**
+
+![](face-recognition\14.png)
+
+##### 2.1.4 模型预测
+
+我们模型的预测代码在 ：facetoPay/yolo_v5/detect.py
+
+![](face-recognition\15.png)
+
+这里和我们训练模型的代码差不多，其实我们如果只是关注这个结果，我们只需要去调整参数就可以
+
+```python
+def parse_opt():
+    parser = argparse.ArgumentParser()
+    # 模型权重的位置
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='model path(s)')
+    # 要处理的图像或视频
+    parser.add_argument('--source', type=str, default=ROOT / 'data/xwlb.mp4', help='file/dir/URL/glob, 0 for webcam')
+    # 数据配置文件
+    parser.add_argument('--data', type=str, default=ROOT / 'data/face.yaml', help='(optional) dataset.yaml path')
+    # 图像的大小
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
+    # 预测结果的置信度的阈值
+    parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
+    # NMS的IOU阈值
+    parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
+    # 一幅图像中最大的目标检测数量
+    parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
+    # 设备信息
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    # 是否显示图片信息
+    parser.add_argument('--view-img', action='store_true', help='show results')
+    # 是否将检测结果保存在txt中
+    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    # 是否保存置信度
+    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
+    # 保存截断的检测框
+    parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
+    # 是否保存图像或视频
+    parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
+    # 类别信息
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
+    # 是否按照类别进行NMS
+    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    # 预测时是否增强：多尺度和TTA预测
+    parser.add_argument('--augment', action='store_true', help='augmented inference')
+    # 是否进行可视化
+    parser.add_argument('--visualize', action='store_true', help='visualize features')
+    # 是否更新模型
+    parser.add_argument('--update', action='store_true', help='update all models')
+    # 预测结果的保存路径
+    parser.add_argument('--project', default=ROOT / 'runs/detect', help='save results to project/name')
+    # 当前次预测的保存位置
+    parser.add_argument('--name', default='exp', help='save results to project/name')
+    # 若存在是否创建新的文件夹
+    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    # 绘制框的线宽
+    parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
+    # 是否隐层类别信息
+    parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
+    # 是否隐藏置信度结果
+    parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
+    # 是否进行半精度预测
+    parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
+    # 是否使用opencv中的dnn端
+    parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
+    opt = parser.parse_args()
+    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+    print_args(FILE.stem, opt)
+    return opt
+```
+
+**我们主要关注这几个配置**
+
+- 模型位置
+- 需要推理的数据位置
+- 数据配置地址
+
+![](face-recognition\16.png)
+
+**1.我们的参数信息如下**
+
+```python
+def run(weights=ROOT / 'yolov5s.pt',  # 模型权重
+        source=ROOT / 'data/images',  # 要预测的数据
+        data=ROOT / 'data/coco128.yaml',  # 数据的配置信息
+        imgsz=(640, 640),  # 预测图像的大小
+        conf_thres=0.25,  # 置信度阈值
+        iou_thres=0.45,  # NMS的IOU阈值
+        max_det=1000,  # 每幅图像中最大的检测目标数
+        device='',  # 设备信息
+        view_img=False,  # 是否显示预测结果
+        save_txt=False,  # 是否保存txt文件
+        save_conf=False,  # 是否保存置信度结果
+        save_crop=False,  # 是否保存裁剪的框的结果
+        nosave=False,  # 是否保存预测结果
+        classes=None,  # 指定检测目标类型
+        agnostic_nms=False,  # 是否按照类别进行NMS
+        augment=False,  # 是否进行增强处理
+        visualize=False,  # 是否保存特征提取结果
+        update=False,  # 是否进行更新
+        project=ROOT / 'runs/detect',  # 预测结果的保存位置
+        name='exp',  # 不创建新的文件夹时结果的保存位置
+        exist_ok=False,  # 是否创建新的文件夹
+        line_thickness=3,  # 绘图时线宽
+        hide_labels=False,  # 是否绘制类别名称
+        hide_conf=False,  # 是否绘制置信度
+        half=False,  # 是否进行半精度预测
+        dnn=False,  # 是否使用opencv进行预测
+        ):
+```
+
+**2.加载模型**
+
+```python
+# 模型加载：指明模型权重的位置，设备信息，数据的配置文件等
+device = select_device(device)
+model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
+```
+
+**3.数据获取**
+
+```python
+# 获取数据
+if webcam:
+    view_img = check_imshow()
+    cudnn.benchmark = True  # set True to speed up constant image size inference
+    # 获取视频流数据
+    dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
+    bs = len(dataset)  # batch_size
+else:
+        # 获取图像数据
+    dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
+    bs = 1  # batch_size
+```
+
+获取每一帧
+
+```python
+# 遍历图像数据获取：path, img, img0, self.cap, s
+for path, im, im0s, vid_cap, s in dataset:
+    # 计时
+    t1 = time_sync()
+    # 类型转换并写入到GPU中
+    im = torch.from_numpy(im).to(device)
+    # 将img转换为fp16/32
+    im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
+    # 归一化处理
+    im /= 255  # 0 - 255 to 0.0 - 1.0
+    # 增加一个bacth维
+    if len(im.shape) == 3:
+            im = im[None]  # expand for batch dim
+
+```
+
+**4.模型预测**
+
+```python
+# 模型预测：输入要处理的图像和增强方法
+pred = model(im, augment=augment, visualize=visualize)
+```
+
+**5.检测NMS**
+
+```python
+# 进行NMS,获取检测结果
+pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+```
+
+
+
+#### 2.2 人脸姿态检测
+
+这个检测我们主要关注的是二维人脸图像的欧拉角
+
+1. pitch 表示俯仰角（关于x轴的旋转角度）抬头
+2. yaw 表示偏航角（关于y轴的旋转角度）摇头
+3. roll 表示翻滚角（关于z轴的旋转角度）摆头（脸前方不变，只是左右摆头）
+
+![](face-recognition\17.png)
+
+![](face-recognition\18.png)
+
+红色代表X轴-脸侧方向，绿色代表Y轴-脸下方向，蓝色代表Z轴-脸正前方向
+
+##### 2.2.0 方法讨论
+
+主要就是机器学习算法和深度学习算法，他们的主流解决方案的优缺点很传统，就是机器学习实现难，需要考虑的太多了。深度学习可研究性太差。
+
+![](face-recognition\19.png)
+
+按照上面的介绍我们使用的是深度学习算法，我们主要是想训练出一个回归器（输出的是欧拉角的数据）。但是我们还是有几个点需要关注的。
+
+1. 首先是角度的范围是 【-90.90】
+2. 接着就是当角度在 【-36，36】的时候我们是可以将人脸数据进行 **透射变换**来进行转正。所以这里就是当我们在这个范围以外是无法将图像进行变换成正脸，就无法提取人脸的多特征，影响后面的模型预测，所以我们当超过这个范围后我们需要通过预测的数据提醒用户调整人脸。
+
+**那我们使用什么算法呢？**
+
+如果是在PC平台上进行部署，可以选择较大型的网络，如VGG16、ResNet50、ResNet101等。如果需要面对嵌入式设备进行部署，则需要选择诸如MobileNet、ShuffleNet、SqueezeNet等轻型网络。在本项目中，我们选用resnet网络
+
+**我们的回归器设计如下**
+
+![](face-recognition\20.png)
+
+**我们的损失函数选择可以使用 MSE，也可以使用 wing**
+
+接着就是我们训练模型的老套路
+
+##### 2.2.1 数据加载
+
+首先我们需要准备人脸数据和对应的标注数据，我们这里的标注的数据还需要人脸检测框的数据，因为一个图片我们不可能将所有人脸都输入，我们只训练最大占比的人脸，而且想一下业务也是这样啊，支付啊，所所以这里就可以和上面的人脸检测模型结合了，检测人脸的输出传到这个模型我们就可以去预测我们的欧拉角了。我们的格式是如下
+
+![](face-recognition\21.png)
+
+我们的数据集在目录：datasets/face_euler_angle_datasets
+
+![](face-recognition\22.png)
+
+加载的代码在：facetoPay/face_euler_angle/data_iter/datasets.py
+
+![](face-recognition\23.png)
+
+里面主要是通过类 LoadImagesAndLabels来进行实现
+
+1. init方法 进行参数的初始化，包括图像路径，图像大小等
+2. len方法 返回数据集中图像文件的数量
+3. getitem方法 返回数据集中的每一个图像信息，供datasetloader来使用，在这里除了完成图像读取的任务外，我们还增加了图像增强处理
+
+如果我们只在乎结果我们就可以只关注参数设置的代码
+
+![](face-recognition\24.png)
+
+这里类主要就是将我们的图像数据，标注的数据加载到可以操作的类里面
+
+**如果这个时候我们需要进行数据加强怎么办？**
+
+我们这个模型对数据进行加强的方法是对 box人脸检测框进行随机扩展并进行裁剪
+
+![](face-recognition\25.png)
+
+```python
+# 读取图像
+img = cv2.imread(img_path)
+# 获取人脸的宽高
+face_w = bbox[2] - bbox[0]
+face_h = bbox[3] - bbox[1]
+# 获取人脸范围
+x_min, y_min, x_max, y_max = bbox[0], bbox[1], bbox[2], bbox[3]
+# 将人脸范围进行随机扩展
+x_min = int(x_min - random.randint(-6, int(face_w * 3 / 5)))
+y_min = int(y_min - random.randint(-6, int(face_h * 2 / 3)))
+x_max = int(x_max + random.randint(-6, int(face_w * 3 / 5)))
+y_max = int(y_max + random.randint(-12, int(face_h * 2 / 5)))
+# 裁剪人脸范围，在图像区域内
+x_min = np.clip(x_min, 0, img.shape[1] - 1)
+x_max = np.clip(x_max, 0, img.shape[1] - 1)
+y_min = np.clip(y_min, 0, img.shape[0] - 1)
+y_max = np.clip(y_max, 0, img.shape[0] - 1)
+# 裁剪获得人脸区域
+try:
+    face_crop = img[y_min:y_max, x_min:x_max, :]
+except:
+    face_crop = img[bbox[1]:bbox[3], bbox[0]:bbox[2], :]
+```
+
+**除了这个我们还可以进行其他的增强，比如翻转，颜色增强**
+
+```python
+# 图像翻转：50%的概率进行，yaw和roll同时进行翻转
+    if random.random() >= 0.5:
+        face_crop = cv2.flip(face_crop, 1)
+        yaw = -yaw
+        roll = -roll
+    # 将人脸区域图像进行缩放至网络输入要求图像的大小
+    img_ = cv2.resize(face_crop, self.img_size, interpolation=random.randint(0, 4))
+    # 颜色增强：30%的概率
+    if self.flag_agu == True:
+        if random.random() > 0.7:
+            # 颜色空间的转换
+            img_hsv = cv2.cvtColor(img_, cv2.COLOR_BGR2HSV)
+            # 随机生成增强的数值
+            hue_x = random.randint(-10, 10)
+            #  对H通道进行增强，并对范围进行调整，0 ~180
+            img_hsv[:, :, 0] = (img_hsv[:, :, 0] + hue_x)
+            img_hsv[:, :, 0] = np.maximum(img_hsv[:, :, 0], 0)
+            img_hsv[:, :, 0] = np.minimum(img_hsv[:, :, 0], 180)
+            img_ = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR)
+```
+
+**我们进行数据增强之后我们就需要将数据进行归一化，类型处理等**
+
+```python
+# 类型转换,BGR->RGB
+img_ = img_.astype(np.float32)[:,:,::-1]
+# 归一化
+img_ = (img_ - 128.) / 256.
+# HWC->CHW
+img_ = img_.transpose(2, 0, 1)
+# 归一化角度
+yaw = yaw / 90.
+pitch = pitch / 90.
+roll = roll / 90.
+# 构成一个一维数组
+angles_ = np.array([yaw, pitch, roll]).ravel()
+return img_, angles_
+```
+
+**经过上面的处理我们可以读一些数据来查看一下**
+
+```python
+    # 获取每个batch的训练数据
+    for i, (imgs_, angles_) in enumerate(dataloader):
+        # 打印角度信息
+        print(angles_)
+        for j in range(ops.batch_size):
+            # 结果展示:反归一化，表示形式CHW->HWC,类型转换，RGB->BGR
+            cv2.imshow('result',np.uint8(imgs_[i].permute(1, 2, 0)*256.0+128.0)[:,:,::-1])
+            cv2.waitKey(0)
+    cv2.destroyAllWindows()
+```
+
+![](face-recognition\26.png)
+
+角度信息输出如下
+
+```python
+tensor([[ 0.0531,  0.0802, -0.0003],
+        [-0.0024,  0.0928, -0.0728]], dtype=torch.float64)
+```
+
+##### 2.2.2 模型构建（ResNet）
+
+这里我们的模型以 Res Net来作为我们的基础网络结构，而在这个网络结构里面的核心模块就是 **残差块**（就是为了防止梯度消失导致的特性消失，我们保留了原有输入X，在进行卷积后再和原有的输入X进行相加，这样就可以防止一些特征的消失）
+
+![](face-recognition\27.png)
+
+**但是不同的深度我们的残差块里面的卷积核的k值和通道数是不一样的**
+
+如果是 18/34就是两个卷积核，如果是 50/101/152我们就是三个卷积核
+
+![](face-recognition\28.png)
+
+**我们的网络结构构建的目录：**facetoPay/face_euler_angle/models/resnet.py
+
+![](face-recognition\29.png)
+
+**基础模块定义**
+
+```python
+# 定义残差模块
+class BasicBlock(nn.Module):
+    # 每一个残差块中的channel都是恒定的，所以倍数是1
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        # downsample对应的是ResNet网络结构中的虚线连接
+        # 比如说 ResNet34中的conv2_x到conv3_x的过渡，
+        # 在shortcut分支需要使用虚线连接，从而将 56*56*64 的输入特征矩阵转变为 28*28*128 的输出特征
+        super(BasicBlock, self).__init__()
+        # 卷积
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        # BN层
+        self.bn1 = nn.BatchNorm2d(planes)
+        # 激活
+        self.relu = nn.ReLU(inplace=True)
+        # 卷积
+        self.conv2 = conv3x3(planes, planes)
+        # BN层
+        self.bn2 = nn.BatchNorm2d(planes)
+        # 下采样倍数
+        self.downsample = downsample
+        # 步长
+        self.stride = stride
+
+    def forward(self, x):
+        # 短连接部分
+        residual = x
+        # CBL
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        # CB
+        out = self.conv2(out)
+        out = self.bn2(out)
+        # 降采样
+        if self.downsample is not None:
+            residual = self.downsample(x)
+        # 求和
+        out += residual
+        # 激活
+        out = self.relu(out)
+        # 输出结果
+        return out
+```
+
+**更深的基础模块定义**（用于构建层数较多的resnet50/101/152网络）
+
+```python
+# 定义瓶颈模块
+class Bottleneck(nn.Module):
+    # 每一个残差块中最后一个卷积核都会扩大的倍数是4
+    # 比如conv2_x中前两个是64 channel，而最后一个卷积层是 256 channel，
+    # 所以在Bottleneck中的expansion为4
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(Bottleneck, self).__init__()
+        # 1*1 卷积
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
+        # BN层
+        self.bn1 = nn.BatchNorm2d(planes)
+        # 3*3卷积
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
+                               padding=1, bias=False)
+        # BN层
+        self.bn2 = nn.BatchNorm2d(planes)
+        # 1*1卷积
+        self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
+        # BN层
+        self.bn3 = nn.BatchNorm2d(planes * 4)
+        # 激活
+        self.relu = nn.ReLU(inplace=True)
+        # 下采样
+        self.downsample = downsample
+        # 步长
+        self.stride = stride
+
+    def forward(self, x):
+        # 短连接
+        residual = x
+        # 1*1卷积
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        # 3*3卷积
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+        # 1*1卷积
+        out = self.conv3(out)
+        out = self.bn3(out)
+        # 下采样
+        if self.downsample is not None:
+            residual = self.downsample(x)
+        # add
+        out += residual
+        # 激活
+        out = self.relu(out)
+        # 输出
+        return out
+```
+
+**上面只是声明两种深度不同的基础模块，而我们需要将他们进行连接才可以工构建完整的 Res Net**
+
+**我们的实现的流程**
+
+1. 构建类（我们定义了一个 ResNet类），并进行初始化
+2. 构建conv1，主要由 7x7卷积来构成
+3. 构建conv2_x，conv3_x，conv4_x，conv5_x部分
+4. 构建输出的全连接层
+5. 网络参数的初始化
+6. 前向传播过程
+
+![](face-recognition\30.png)
+
+**第一步：构建类，并进行初始化**
+
+```python
+class ResNet(nn.Module):
+    # 模型构建
+    def __init__(self, block, layers, num_classes=1000, img_size=224, dropout_factor=1.):
+        """
+        :param block: 残差结构，层数不同，传入的block也不同，比如说ResNet18/34传入的就是BasicBlock所对应的残差结构，而ResNet50/101/152传入的就是Bottleneck所对应的残差结构
+        :param layers: 对应的是一个残差结构的数目，是以列表的形式存储，比如对于ResNet50而言就是[3,4,6,3]
+        :param num_classes: 网络输出的类别数
+        :param img_size: 图像大小
+        :param dropout_factor: 随机失活的概率
+        """
+        # 定义输入到残差块中特征图的通道，
+        # channel定义为64是因为经过maxpool之后channel就会变为64
+        self.inplanes = 64
+        # 随机失活的概率
+        self.dropout_factor = dropout_factor
+        super(ResNet, self).__init__()
+```
+
+**第二步：构建conv1，主要由 7x7卷积来构成**
+
+```python
+# ResNet18、ResNet34、ResNet50、ResNet101等都是先经过由7*7的卷积核、
+# out_channel为64，stride为2的卷积层构成
+# 输入的图片都是3通道的，所以Conv2d的第一个参数为3
+self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
+                       bias=False)
+self.bn1 = nn.BatchNorm2d(64)
+# inplace等于true，表示对上层传下来的tensor直接修改，这样能够节省运算内存
+self.relu = nn.ReLU(inplace=True)
+```
+
+**第三步：构建conv2_x，conv3_x，conv4_x，conv5_x部分**
+
+```python
+# 最大池化
+self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, ceil_mode=True)
+# 连续4个残差模块
+self.layer1 = self._make_layer(block, 64, layers[0])
+self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+```
+
+```python
+def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        # 通过一个1*1卷积进行下采样，在短连接部分
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        # 第一个残差块中需要shortcut虚线连接，所以要传入downsample和stride
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        # 第一个残差块的通道数发生变化，要修正通道数
+        self.inplanes = planes * block.expansion
+        # 添加后续的残差块
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+        # 返回残差模块
+        return nn.Sequential(*layers)
+```
+
+**第四步：构建输出的全连接层**
+
+```python
+# 获取特征图大小，整个网络是32倍下采样，所以图像应能够被32整除
+assert img_size % 32 == 0
+pool_kernel = int(img_size / 32)
+# 全局平均池化，输出（n,c,1,1）的特征图
+self.avgpool = nn.AvgPool2d(pool_kernel, stride=1, ceil_mode=True)
+# 随机失活
+self.dropout = nn.Dropout(self.dropout_factor)
+# 全连接层输出层：
+# 对于ResNet18/34而言，最后一层输出维度为512，
+# 对于ResNet50/101/152而言，最后一层输出维度为2048，所以要使用512*block.expansion，
+# 全连接层的输出为num_classes
+self.fc = nn.Linear(512 * block.expansion, num_classes)
+```
+
+**第五步：网络参数的初始化，卷积层参数使用高斯分布进行初始化，BN层使用全0、全1进行初始化**
+
+```python
+# 初始化
+for m in self.modules():
+# 卷积层的初始化
+if isinstance(m, nn.Conv2d):
+    n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+    m.weight.data.normal_(0, math.sqrt(2. / n))
+# BN层的初始化
+elif isinstance(m, nn.BatchNorm2d):
+    m.weight.data.fill_(1)
+    m.bias.data.zero_()
+```
+
+**第六步：前向传播过程**
+
+```python
+def forward(self, x):
+    # 前向传播过程
+    # 卷积部分
+    x = self.conv1(x)
+    x = self.bn1(x)
+    x = self.relu(x)
+    x = self.maxpool(x)
+    # 残差模块部分
+    x = self.layer1(x)
+    x = self.layer2(x)
+    x = self.layer3(x)
+    x = self.layer4(x)
+    # 全局池化
+    x = self.avgpool(x)
+    # 展评为一维向量
+    x = x.view(x.size(0), -1)
+    # 失活
+    x = self.dropout(x)
+    # 输出结果
+    x = self.fc(x)
+    return x
+```
+
+**这里我们就可以定义各种深度的 Res Net网络架构模型**
+
+```python
+def resnet18(pretrained=False, **kwargs):
+    # 模型初始化
+    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    if pretrained:
+        # 加载预训练模型
+        print("Load pretrained model from {}".format(model_urls['resnet18']))
+        pretrained_state_dict = model_zoo.load_url(model_urls['resnet18'])
+        model = load_model(model, pretrained_state_dict)
+    return model
+
+def resnet34(pretrained=False, **kwargs):
+    # 模型初始化
+    model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        # 加载预训练模型
+        print("Load pretrained model from {}".format(model_urls['resnet34']))
+        pretrained_state_dict = model_zoo.load_url(model_urls['resnet34'])
+        model = load_model(model, pretrained_state_dict)
+    return model
+
+
+def resnet50(pretrained=False, **kwargs):
+    # 模型初始化
+    model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        # 加载预训练模型
+        print("Load pretrained model from {}".format(model_urls['resnet50']))
+        pretrained_state_dict = model_zoo.load_url(model_urls['resnet50'])
+        model = load_model(model, pretrained_state_dict)
+    return model
+
+
+def resnet101(pretrained=False, **kwargs):
+    # 模型初始化
+    model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
+    if pretrained:
+        # 加载预训练模型
+        print("Load pretrained model from {}".format(model_urls['resnet101']))
+        pretrained_state_dict = model_zoo.load_url(model_urls['resnet101'])
+        model = load_model(model, pretrained_state_dict)
+    return model
+
+
+def resnet152(pretrained=False, **kwargs):
+    # 模型初始化
+    model = ResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
+    if pretrained:
+        # 加载预训练模型
+        print("Load pretrained model from {}".format(model_urls['resnet152']))
+        pretrained_state_dict = model_zoo.load_url(model_urls['resnet152'])
+        model = load_model(model, pretrained_state_dict)
+    return model
+```
+
+**我们需要测试一下我们的网络结构是否可以成功**
+
+```python
+if __name__ == "__main__":
+    # 模型测试
+    input = torch.randn([32, 3, 256, 256])
+    model = resnet34(False, num_classes=3, img_size=256)
+    output = model(input)
+    print(output.size())
+```
+
+输出：
+
+```python
+torch.Size([32, 3])
+```
+
+32是我们输入的批次数据，3是我们预测出来的欧拉角，所以我们的网络架构搭建是成功的
+
+##### 2.2.3 模型训练
+
+我们的模型训练代码目录：facetoPay/face_euler_angle/train.py
+
+![](face-recognition\31.png)
+
+如果我们只关注结果，我们就只需要关注里面的参数设置就可以
+
+```python
+parser = argparse.ArgumentParser(description=' Project Face Euler Angle Train')
+    # 模型输出文件夹
+    parser.add_argument('--model_exp', type=str, default='./model_exp',
+                        help='model_exp')
+    # 模型类型
+    parser.add_argument('--model', type=str, default='resnet_18',
+                        help='model : resnet_18,resnet_34,resnet_50')
+    #  yaw,pitch,roll
+    parser.add_argument('--num_classes', type=int, default=3,
+                        help='num_classes')
+    # GPU选择
+    parser.add_argument('--GPUS', type=str, default='0',
+                        help='GPUS')
+    # 训练集标注信息
+    parser.add_argument('--train_path', type=str,
+                        default='/Users/yaoxiaoying/Desktop/人脸支付/02.code/datasets/face_euler_angle_datasets/',
+                        help='train_path')
+    # 是否使用预训练模型
+    parser.add_argument('--pretrained', type=bool, default=True,
+                        help='Pretrain')
+    # 预训练模型位置
+    parser.add_argument('--fintune_model', type=str,
+                        default='none',
+                        help='fintune_model')
+    # 损失函数定义
+    parser.add_argument('--loss_define', type=str, default='wing_loss',
+                        help='define_loss')
+    # 初始化学习率
+    parser.add_argument('--init_lr', type=float, default=1e-3,
+                        help='init_learningRate')
+    # 优化器正则损失权重
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
+                        help='weight_decay')
+    # 优化器动量
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='momentum')
+    # 训练每批次图像数量
+    parser.add_argument('--batch_size', type=int, default=2,
+                        help='batch_size')
+    # dropout
+    parser.add_argument('--dropout', type=float, default=0.5,
+                        help='dropout')
+    # 训练周期
+    parser.add_argument('--epochs', type=int, default=2,
+                        help='epochs')
+    # 训练线程数
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='num_workers')
+    # 输入模型图片尺寸
+    parser.add_argument('--img_size', type=tuple, default=(256, 256),
+                        help='img_size')
+    # 是否进行数据增强
+    parser.add_argument('--flag_agu', type=bool, default=True,
+                        help='data_augmentation')
+    # 模型输出文件夹是否进行清除
+    parser.add_argument('--clear_model_exp', type=bool, default=False,
+                        help='clear_model_exp')
+
+    # --------------------------------------------------------------------------
+    args = parser.parse_args()  # 解析添加参数
+    # --------------------------------------------------------------------------
+    # 根据配置信息创建训练结果保存的根目录
+    # mkdir_的功能是：
+    # 存在路径时
+    # 若flag_rm = True，则删除文件重新创建
+    # 否则不修改
+    # 若不存在路劲，则创建路径即可
+    mkdir_(args.model_exp, flag_rm=args.clear_model_exp)
+    loc_time = time.localtime()
+    args.model_exp = args.model_exp + '/' + time.strftime("%Y-%m-%d_%H-%M-%S", loc_time) + '/'
+    # 根据训练时间创建保存结果的路经
+    mkdir_(args.model_exp, flag_rm=args.clear_model_exp)
+    # parse_args()方法的返回值为namespace，用vars()内建函数化为字典
+    unparsed = vars(args)
+    # 打印参数结果
+    for key in unparsed.keys():
+        print('{} : {}'.format(key, unparsed[key]))
+    # 当前时间
+    unparsed['time'] = time.strftime("%Y-%m-%d %H:%M:%S", loc_time)
+    # 将配置信息写入到文件中
+    fs = open(args.model_exp + 'train_ops.json', "w", encoding='utf-8')
+    json.dump(unparsed, fs, ensure_ascii=False, indent=1)
+    fs.close()
+    # 模型训练
+    trainer(ops=args)
+    print('well done : {}'.format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())))
+```
+
+配置信息解析后的结果打印如下：
+
+```python
+model_exp : ./model_exp/2021-05-14_09-49-28/
+model : resnet_18
+num_classes : 3
+GPUS : 0
+train_path : /models/yaoxiaoying/datasets/face_euler_angle_datasets/
+pretrained : True
+fintune_model : /models/yaoxiaoying/models/wyw2smodels/euler_angle-resnet_18_imgsize_256.pth
+loss_define : wing_loss
+init_lr : 0.001
+lr_decay : 0.5
+weight_decay : 0.0005
+momentum : 0.9
+batch_size : 128
+dropout : 0.5
+epochs : 2
+num_workers : 8
+img_size : (256, 256)
+flag_agu : True
+clear_model_exp : False
+log_flag : True
+use model : resnet_18
+```
+
+**接着我们需要将这些配置信息保存**
+
+![](face-recognition\32.png)
+
+**接着正式进入我们的训练过程**
+
+1. 模型加载
+2. 数据加载
+3. 模型训练
+
+**模型加载**
+
+```python
+    # 模型加载
+    if ops.model == 'resnet_50':
+        model_ = resnet50(pretrained=False, num_classes=ops.num_classes, img_size=ops.img_size[0],
+                          dropout_factor=ops.dropout)
+    elif ops.model == 'resnet_34':
+        model_ = resnet34(pretrained=False, num_classes=ops.num_classes, img_size=ops.img_size[0],
+                          dropout_factor=ops.dropout)
+    elif ops.model == 'resnet_18':
+        model_ = resnet18(pretrained=False, num_classes=ops.num_classes, img_size=ops.img_size[0],
+                          dropout_factor=ops.dropout)
+    # 若有GPU使用GPU进行训练
+    use_cuda = torch.cuda.is_available()
+    # 否则使用CPU
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    # 将网络写入设备中
+    model_ = model_.to(device)
+```
+
+```python
+ # 加载预训练模型
+ if os.access(ops.fintune_model, os.F_OK):  # checkpoint
+    chkpt = torch.load(ops.fintune_model, map_location=device)
+    model_.load_state_dict(chkpt)
+    print('load fintune model : {}'.format(ops.fintune_model))
+```
+
+**数据加载**
+
+```python
+# 数据加载
+dataset = LoadImagesAndLabels(ops=ops, img_size=ops.img_size,flag_agu=ops.flag_agu)
+# Dataloader获取batchsize的数据
+dataloader = DataLoader(dataset,
+                batch_size=ops.batch_size,
+                num_workers=ops.num_workers,
+                shuffle=True)
+```
+
+**模型训练**
+
+- 第一步：优化器，损失函数等相关信息的设置
+- 第二步：遍历epoch进行网络训练
+- 第三步：遍历每个batch的数据，进行预测，计算损失函数，进行反向传播
+- 第四步：保存ckpt
+- 第五步：损失变化曲线的绘制
+
+进行优化器，损失函数的设置，并初始化loss列表，用于损失函数曲线的绘制
+
+```python
+    # 优化器设置
+    optimizer = torch.optim.Adam(model_.parameters(), lr=ops.init_lr, betas=(0.9, 0.99),
+                                 weight_decay=ops.weight_decay)
+    # 损失函数
+    if ops.loss_define != 'wing_loss':
+        criterion = nn.MSELoss(reduce=True, reduction='mean')
+    loss_list = []
+```
+
+遍历每个epoch开始进行训练
+
+```python
+# 遍历每个epoch进行训练
+    for epoch in range(0, ops.epochs):
+        # 模型训练开始
+        model_.train()
+        # 损失均值，用于记录损失的和，与idx结合使用获取一个epoch中损失均值
+        loss_mean = 0.
+        # 损失计算计数器
+        loss_idx = 0.
+```
+
+遍历batch中的数据，进行预测，计算损失函数，并打印训练结果，进行反向传播
+
+```python
+# 获取每个batch的训练数据
+        for i, (imgs_, angles_) in enumerate(dataloader):
+            # 设备设置，pytorch 的数据输入格式 ： (batch, channel, height, width)
+            if use_cuda:
+                imgs_ = imgs_.cuda()
+                angles_ = angles_.cuda()
+            # 网络预测
+            output_angles_ = model_(imgs_.float())
+            # 损失计算：可以使用wing_loss，也可以使用默认使用MSE损失
+            if ops.loss_define == 'wing_loss':
+                loss_angles = got_total_wing_loss(output_angles_, angles_.float())
+            else:
+                loss_angles = criterion(output_angles_, angles_.float())
+            # 当前batch损失
+            loss = loss_angles
+            loss_list.append(loss)
+            # 获取损失的和
+            loss_mean += loss.item()
+            # 计数加1
+            loss_idx += 1.
+            # 每10个batch打印一次结果
+            if i % 1 == 0:
+                loc_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                print('  %s - %s - epoch [%s/%s] (%s/%s):' % (
+                    loc_time, ops.model, epoch, ops.epochs, i, int(dataset.__len__() / ops.batch_size)), \
+                      'Mean Loss : %.6f - Loss: %.6f' % (loss_mean / loss_idx, loss.item()), ' bs:', ops.batch_size, \
+                      ' img_size: %s x %s' % (ops.img_size[0], ops.img_size[1]))
+            # 计算梯度
+            loss.backward()
+            # 优化器对模型参数更新
+            optimizer.step()
+            # 优化器梯度清零
+            optimizer.zero_grad()
+```
+
+保存ckpt
+
+```python
+# 每5个epoch保存一次训练结果
+if epoch % 5 == 0:
+    torch.save(model_.state_dict(),
+               ops.model_exp + '{}_imgsize_{}-epoch-{}.pth'.format(ops.model, ops.img_size[0], epoch)
+```
+
+损失变化的曲线
+
+```python
+# 创建第一张画布
+    plt.figure(0)
+    # 绘制总损失曲线 , 颜色为蓝色
+    plt.plot(loss_list, color="blue", label="Loss")
+    # 曲线说明在左上方
+    plt.legend(loc='upper left')
+    # 保存图片
+    plt.savefig("./loss.png")
+```
+
+![](face-recognition\33.png)
+
+##### 2.2.4 模型推理
+
+我们的模型推理的流程如下
+
+![](face-recognition\34.png)
+
+而我们的推理的代码目录：facetoPay/face_euler_angle/inference.py
+
+![](face-recognition\35.png)
+
+如果我们只在关注结果我们就可以看参数配置信息内容就可以
+
+**1.配置信息解析**
+
+```python
+parser = argparse.ArgumentParser(description=' Project face euler angle Test')
+# 训练好的模型路径
+parser.add_argument('--test_model', type=str,
+                    default='./model_exp/2021-05-13_07-07-30/resnet_18_imgsize_256-epoch-5.pth',
+                    help='test_model')
+# 模型类型
+parser.add_argument('--model', type=str, default='resnet_18',
+                    help='model : resnet_x')
+# 分类类别个数
+parser.add_argument('--num_classes', type=int, default=3,
+                    help='num_classes')
+# GPU选择
+parser.add_argument('--GPUS', type=str, default='0',
+                    help='GPUS')
+# 测试集路径
+parser.add_argument('--test_path', type=str, default='./samples/',
+                    help='test_path')
+# 输入模型图片尺寸
+parser.add_argument('--img_size', type=tuple, default=(256, 256),
+                    help='img_size')
+# 是否可视化图片
+    parser.add_argument('--vis', type=bool, default=True,
+                        help='vis')
+print('\n/******************* {} ******************/\n'.format(parser.description))
+# --------------------------------------------------------------------------
+# 解析添加参数
+ops = parser.parse_args()
+# parse_args()方法的返回值为namespace，用vars()内建函数化为字典
+unparsed = vars(ops)
+# 打印参数配置信息
+for key in unparsed.keys():
+    print('{} : {}'.format(key, unparsed[key]))
+# 设备设置
+os.environ['CUDA_VISIBLE_DEVICES'] = ops.GPUS
+# 测试图片文件夹路径
+test_path = ops.test_path
+```
+
+输出结果：
+
+```python
+test_model : ./model_exp/2021-05-13_07-07-30/resnet_18_imgsize_256-epoch-5.pth
+model : resnet_18
+num_classes : 3
+GPUS : 0
+test_path : ./samples/
+img_size : (256, 256)
+use model : resnet_18
+```
+
+**2.模型加载**
+
+构建模型（选择模型）
+
+```python
+# 构建模型
+if ops.model == 'resnet_50':
+    model_ = resnet50(num_classes=ops.num_classes, img_size=ops.img_size[0])
+elif ops.model == 'resnet_18':
+    model_ = resnet18(num_classes=ops.num_classes, img_size=ops.img_size[0])
+elif ops.model == 'resnet_34':
+    model_ = resnet34(num_classes=ops.num_classes, img_size=ops.img_size[0])
+```
+
+获取设备信息，将模型写入设备中
+
+```python
+# 设备设置
+use_cuda = torch.cuda.is_available()
+# 将网络写入设备中
+device = torch.device("cuda:0" if use_cuda else "cpu")
+model_ = model_.to(device)
+# 设置为前向推断模式
+model_.eval()
+```
+
+加载预训练模型
+
+```python
+# 加载预训练模型
+if os.access(ops.test_model, os.F_OK):
+    chkpt = torch.load(ops.test_model, map_location=device)
+    model_.load_state_dict(chkpt)
+    print('load test model : {}'.format(ops.test_model))
+```
+
+**3.数据加载**
+
+```python
+# 遍历要检测的文件夹
+for file in os.listdir(ops.test_path):
+    # 判断是否是图像文件，否则处理下个文件
+    if '.jpg' not in file:
+        continue
+    # 图像文件计数
+    idx += 1
+    print('{}) image : {}'.format(idx, file))
+    # 读取文件
+    img = cv2.imread(ops.test_path + file)
+    # 获取图像文件的宽高
+    img_width = img.shape[1]
+    img_height = img.shape[0]
+    # 输入图片尺寸调整
+    img_ = cv2.resize(img, (ops.img_size[1], ops.img_size[0]), interpolation=cv2.INTER_CUBIC)
+    # 类型转换
+    img_ = img_.astype(np.float32)
+    # 归一化
+    img_ = (img_ - 128.) / 256.
+    # 通道调整
+    img_ = img_.transpose(2, 0, 1)
+    img_ = torch.from_numpy(img_)
+    # 增加一个batch通道(bs, 3, h, w)
+    img_ = img_.unsqueeze_(0)
+```
+
+![](face-recognition\36.png)
+
+**4.模型预测**
+
+- 将数据送入网络中进行预测，获取人脸姿态的角度
+- 将检测信息绘制在图像上
+- 若有可视化设备可以进行展示，负责将结果保存下来
+
+```python
+    # 使用cuda
+    if use_cuda:
+        img_ = img_.cuda()
+    # 送入网络中进行预测
+    pre_ = model_(img_.float())
+    # 预测结果
+    output = pre_.cpu().detach().numpy()
+    output = np.squeeze(output)
+    # 获取角度，并反归一化，得到最终的检测结果
+    yaw, pitch, roll = output
+    yaw = yaw * 90.
+    pitch = pitch * 90.
+    roll = roll * 90.
+    print("yaw: {:.1f}, pitch: {:.1f}, roll: {:.1f}".format(yaw, pitch, roll))
+    # 将检测结果绘制在图像上
+    cv2.putText(img, "ypr:{:.1f},{:.1f},{:.1f}".format(yaw, pitch, roll), (1, 80), cv2.FONT_HERSHEY_DUPLEX, 2,
+                (55, 0, 220), 5)
+    cv2.putText(img, "ypr:{:.1f},{:.1f},{:.1f}".format(yaw, pitch, roll), (1, 80), cv2.FONT_HERSHEY_DUPLEX, 2,
+                (255, 50, 50), 2)
+    # 展示：无可视化设备时只能进行保存处理
+    if ops.vis:
+        # cv2.namedWindow('image', 0)
+        # cv2.imshow('image', img)
+        cv2.imwrite("./samples/results/" + file, img)
+        # if cv2.waitKey(1000) == 27:
+        #     break
+        # cv2.destroyAllWindows()
+        print('well done ')
+```
+
+输出结果：
+
+```python
+1) image : 2021-04-15-03-17-34-100.jpg
+yaw: 26.2, pitch: 23.1, roll: -1.3
+2) image : 2021-04-15-03-17-39-169.jpg
+yaw: 22.7, pitch: 11.8, roll: -4.3
+3) image : 2021-04-15-03-17-40-185.jpg
+yaw: 9.8, pitch: 6.0, roll: -2.5
+```
+
+![](face-recognition\37.png)
+
+#### 2.3 人脸多任务
+
+##### 2.3.0 方法讨论
+
+首先我们需要明确我们的多任务代表的是哪几个任务
+
+1. 关键点检测（这里我们采用的是98关键点检测，但是我们是是需要他的xy坐标，所以我们需要196个输出神经元）
+2. 年龄检测（这个一个神经元就可以）
+3. 年龄识别检测（这个两个神经元就可以）
+
+**人脸关键点**
+
+首先是人脸关键点主要是以下这几个类型，但是最关键点就是我们的数据或者推理的时候是需要正脸的或者我们可以通过透射来实现正脸化
+
+- 眉毛
+- 眼睛
+- 鼻子
+- 嘴巴
+- 脸部轮廓区域
+
+![](face-recognition\38.png)
+
+![](face-recognition\39.png)
+
+而关键应用主要有：
+
+- 人脸姿态对齐，人脸识别等算法都需要对人脸的姿态进行对齐从而提高模型的精度
+- 人脸美颜与编辑，基于关键点可以精确分析脸型、眼睛形状、鼻子形状等，从而对人脸的特定位置进行修饰加工，实现人脸的特效美颜，贴片等娱乐功能，也能辅助一些人脸编辑算法更好地发挥作用
+- 人脸表情分析，基于关键点可以对人的面部表情进行分析，从而用于互动娱乐，行为预测等场景
+
+**实现的方法就是将找关键点的任务转成像素点分类+热力图回归任务**
+
+很简单去理解这个方法，就是在训练阶段为每张图片的每一个关键点都设定一个概率范围，关键点的概率最大，周围是高斯发布一样
+
+**人脸性别**
+
+这个主要是二分类的问题。人脸性别分类因其在人类身份认证、人机接口、视频检索以及机器人视觉中的潜在应用而备受关注。实现起来也很简单，大量数据 + 模型训练即可
+
+**但是中性脸和小孩脸一直都是这里的难题，不要说人工智能了，我们眼睛都不一定看的出来**
+
+![](face-recognition\40.png)
+
+![](face-recognition\41.png)
+
+**人脸年龄**
+
+因为年龄只需要一个值，所以我们也可以将年龄检测当作一种回归问题。有研究者通过对已有年龄估计工作进行总结后认为: 针对不同的年龄数据库和不同的年龄特征、分类模式和回归模式具有各自的优越性，因此将二者有机融合可以有效提高年龄估计的精度。由于传统的年龄估计模式忽略了人脸衰老的动态性，最近研究人员又将排序模型引入到年龄估计方法中，并取得了较好的效果
+
+**对于分类模型**
+
+![](face-recognition\42.png)
+
+**对于回归模型**
+
+![](face-recognition\43.png)
+
+**对于排序模型**
+
+人类衰老是一个“动态”变化的个性化过程。传统的基于分类模式的年龄估计把年龄分成了若干个年龄段，没有考虑到不同年龄之间的相互关系，因此损失了很多重要的信息; 传统的回归模式虽然考虑到了年龄之间的相关性，但是却假设人的衰老是一个“静态”过程，即不同年龄的人的衰老变化规律一致。此外，在日常生活中，我们对一个人进行年龄判定时，总是将该人脸与我们熟悉的且知道相应年龄的人脸图像进行比较，通过综合大量的比较结果进行年龄判断
+
+![](face-recognition\44.png)
+
+我们可以将上面的多任务进行联合，放在同一个框架下同时进行
+
+![](face-recognition\45.png)
+
+**但是这里我们需要对不同任务进行损失函数的不同权重化**
+
+而这里我们使用到的损失函数 wing loss是 **是关键点检测”专用“的损失函数**
+
+![](face-recognition\46.png)
+
+![](face-recognition\47.png)
+
+推荐的参数如下表所示
+
+![](face-recognition\48.png)
+
+##### 2.3.1 数据加载
+
+数据加载之前首先我们需要了解数据的格式，图片数据不用多说，主要是标注数据，这里我们还是需要使用到上面的人脸检测数据为标注的一部分
+
+![](face-recognition\49.png)
+
+而数据集目录在：datasets/wiki_crop_face_multi_task
+
+![](face-recognition\50.png)
+
+我们将图像和标注信息绘制在一起的图像就是
+
+![](face-recognition\51.png)
+
+数据预处理的代码在：facetoPay/face_multi_task/data_iter/datasets.py
+
+![](face-recognition\52.png)
+
+这个数据出来文件核心是通过类 LoadImagesAndLabels来实现
+
+- init方法 进行参数的初始化，包括图像路径，图像大小等
+- len方法 返回数据集中图像文件的数量
+- getitem方法 返回数据集中的每一个图像信息，进行数据获取和增强处理，供dataloader来使用
+
+```python
+ # 初始化
+    def __init__(self, ops, img_size=(224, 224), flag_agu=False):
+        # 参数的初始化
+        # 年龄的最大值在0以上
+        max_age = 0
+        # 年龄的最小值在65535以下
+        min_age = 65535.
+        # 存储图像文件的list
+        file_list = []
+        # 关键点list
+        landmarks_list = []
+        # 年龄list
+        age_list = []
+        # 性别list
+        gender_list = []
+        # 图像计数
+        idx = 0
+        # 遍历所有的图像
+        for f_ in os.listdir(ops.train_path):
+            # 读取json文件
+            f = open(ops.train_path + f_, encoding='utf-8')
+            # 将json文件中的内容写入dict中
+            dict = json.load(f)
+            # 关闭文件流
+            f.close()
+            # 若年龄超出1-100之间，则循环下条数据
+            if dict["age"] > 100. or dict["age"] < 1.:
+                continue
+            idx += 1
+            # 获取标注json文件对应的图像文件
+            img_path_ = (ops.train_path + f_).replace("label_new", "image").replace(".json", ".jpg")
+            # 读取图像数据
+            img = cv2.imread(img_path_)
+            # 将路径保存在file_list中
+            file_list.append(img_path_)
+            # 关键点list
+            pts = []
+            # 遍历所有的关键点
+            for pt_ in dict["landmarks"]:
+                # 获取关键点坐标
+                x, y = pt_
+                # 将其保存在list中
+                pts.append([x, y])
+            # 将关键点保存下来
+            landmarks_list.append(pts)
+            # 创建性别的目标值
+            if dict["gender"] == "male":
+                gender_list.append(1)
+            else:
+                gender_list.append(0)
+            # 将目标值存放在list中
+            age_list.append(dict["age"])
+            # 更新年龄的极值                  
+            if max_age < dict["age"]:  
+                max_age = dict["age"]  
+            if min_age > dict["age"]:  
+                min_age = dict["age"]  
+        # 属性赋值
+        self.files = file_list
+        self.landmarks = landmarks_list
+        self.ages = age_list
+        self.genders = gender_list
+        self.img_size = img_size
+        self.flag_agu = flag_agu
+```
+
+**当然，我们还是有数据增强的这一部分**
+
+- 第一步：通过init中赋值的属性获取图像路经，人脸区域，关键点，性别和年龄
+- 第二步：读入图像，裁剪获取人脸区域，并进行几何增强
+- 第三步：图像增强，主要是HSV颜色增强
+- 第四步：对数据进行归一化，类型等处理，获取最终的数据
+
+**第一步**
+
+```python
+def __getitem__(self, index):
+    # 获取图像路径
+    img_path = self.files[index]
+    # 关键点
+    pts = self.landmarks[index]
+    # 性别
+    gender = self.genders[index]
+    # 年龄
+    age = self.ages[index]
+```
+
+**第二步**
+
+读入图像，根据关键点的范围获取人脸区域，若要进行图像增强则使用face_random_rotate方法进行旋转和翻转等处理，裁剪图像获取人脸区域，并修正关键点的坐标值，否则直接裁剪人脸区域
+
+![](face-recognition\53.png)
+
+```python
+# 读取图像 -BGR                
+img = cv2.imread(img_path) 
+# 若进行图像增强,进行图像旋转
+if self.flag_agu and random.random() > 0.35:
+    # 图像旋转 65%
+    # 获取左眼和右眼的关键点的均值,用于计算旋转中心
+    left_eye = np.average(pts[60:68], axis=0)
+    right_eye = np.average(pts[68:76], axis=0)
+    # 随机生成旋转角度
+    angle_random = random.randint(-33, 33)
+    # 返回旋转后的crop图和归一化的关键点:
+    img_, landmarks_ = face_random_rotate(img, pts, angle_random, left_eye, right_eye, img_size=self.img_size)
+else:
+    # 对人脸区域进行裁剪，并进行归一化
+    x_max = -65535
+    y_max = -65535
+    x_min = 65535
+    y_min = 65535
+    # 遍历所有的关键点
+    for pt_ in pts:
+        # 获取x,y坐标
+        x_, y_ = int(pt_[0]), int(pt_[1])
+        # 获取关键点区域的左上角坐标和右下角坐标
+        x_min = x_ if x_min > x_ else x_min
+        y_min = y_ if y_min > y_ else y_min
+        x_max = x_ if x_max < x_ else x_max
+        y_max = y_ if y_max < y_ else y_max
+
+        # 获取人脸区域的宽高
+        face_w = x_max - x_min
+        face_h = y_max - y_min
+        # 对人脸区域进行随机的扩展
+        x_min = int(x_min - random.randint(-6, int(face_w / 10)))
+        y_min = int(y_min - random.randint(-6, int(face_h / 10)))
+        x_max = int(x_max + random.randint(-6, int(face_w / 10)))
+        y_max = int(y_max + random.randint(-6, int(face_h / 10)))
+        # 确保坐标在图像范围内
+        x_min = np.clip(x_min, 0, img.shape[1] - 1)
+        x_max = np.clip(x_max, 0, img.shape[1] - 1)
+        y_min = np.clip(y_min, 0, img.shape[0] - 1)
+        y_max = np.clip(y_max, 0, img.shape[0] - 1)
+        # 获取人脸区域的宽高
+        face_w = x_max - x_min
+        face_h = y_max - y_min
+        # 裁剪人脸区域
+        face_crop = img[y_min:y_max, x_min:x_max, :]
+        # 关键点
+        landmarks_ = []
+        # 遍历所有的关键点
+        for pt_ in pts:
+            # 获取关键点相对于裁剪后人脸的坐标值
+            x_, y_ = int(pt_[0]) - x_min, int(pt_[1]) - y_min
+            # 将关键点进行归一化
+            landmarks_.append([float(x_) / float(face_w), float(y_) / float(face_h)])
+                # 将图像进行缩放
+        img_ = cv2.resize(face_crop, self.img_size, interpolation=random.randint(0, 4))
+```
+
+**第三步**
+
+图像增强，主要是HSV颜色增强，与在人脸姿态任务中是一样的
+
+```python
+        # 颜色增强
+        if self.flag_agu:
+            # 颜色增强 70%的概率
+            if random.random() > 0.7:
+                # 颜色空间转换
+                img_hsv = cv2.cvtColor(img_, cv2.COLOR_BGR2HSV)
+                hue_x = random.randint(-10, 10)
+                # 对H通道进行增强
+                img_hsv[:, :, 0] = (img_hsv[:, :, 0] + hue_x)
+                # 对取值进行修正
+                img_hsv[:, :, 0] = np.maximum(img_hsv[:, :, 0], 0)
+                img_hsv[:, :, 0] = np.minimum(img_hsv[:, :, 0], 180)
+                # 将色彩空间转换为BGR
+                img_ = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR)
+```
+
+**第四步**
+
+对数据进行归一化，类型等处理，获取最终的数据，送入网络中进行处理
+
+```python
+# 类型转换,BGR->RGB
+img_ = img_.astype(np.float32)[:,:,::-1]
+# 归一化处理
+img_ = (img_ - 128.) / 256.
+# CHW->HWC
+img_ = img_.transpose(2, 0, 1)
+# 关键点的扁平化处理 [98，2]->[1,196]
+landmarks_ = np.array(landmarks_).ravel()
+# 年龄，去中心化，归一化
+age = np.expand_dims(np.array(((age - 50.) / 100.)), axis=0)  
+return img_, landmarks_, gender, age
+```
+
+![](face-recognition\54.png)
+
+##### 2.3.2 模型构建（ResNet）
+
+相关内容和我们上面进行的人脸姿态模型搭建是差不多的。但是我们的网络构成是这样的
+
+![](face-recognition\55.png)
+
+网络构建的目录在：facetoPay/face_multi_task/models/resnet.py
+
+![](face-recognition\56.png)
+
+**我们的输出层设计**
+
+```python
+# 全局平均池化，输出（n,c,1,1）的特征图
+self.avgpool = nn.AvgPool2d(pool_kernel, stride=1, ceil_mode=True)
+# 随机失活
+self.dropout1 = nn.Dropout(self.dropout_factor)
+self.dropout2 = nn.Dropout(0.8)
+self.dropout3 = nn.Dropout(0.65)
+
+self.dropout = nn.Dropout(self.dropout_factor)
+# 关键点的输出层
+self.fc_landmarks_1 = nn.Linear(512 * block.expansion, 1024)
+self.fc_landmarks_2 = nn.Linear(1024, landmarks_num)
+# 性别的输出层
+self.fc_gender_1 = nn.Linear(512 * block.expansion, 64)
+self.fc_gender_2 = nn.Linear(64, 2)
+# 年龄的输出层
+self.fc_age_1 = nn.Linear(512 * block.expansion, 64)
+self.fc_age_2 = nn.Linear(64, 1)
+```
+
+**前向传播过程**
+
+```python
+    def forward(self, x):
+        # 前向传播过程
+        # 卷积部分
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        # 残差模块部分
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        # 全局池化
+        x = self.avgpool(x)
+        # 展评为一维向量
+        x = x.view(x.size(0), -1)
+
+        # 关键点
+        landmarks = self.fc_landmarks_1(x)
+        landmarks = self.dropout1(landmarks)
+        landmarks = self.fc_landmarks_2(landmarks)
+        # 性别
+        gender = self.fc_gender_1(x)
+        gender = self.dropout2(gender)
+        gender = self.fc_gender_2(gender)
+        # 年龄
+        age = self.fc_age_1(x)
+        age = self.dropout3(age)
+        age = self.fc_age_2(age)
+        # 返回结果
+        return landmarks,gender,age
+```
+
+**接着就是我们的模型测试**
+
+```python
+if __name__ == "__main__":
+    # 构建输入数据
+    input = torch.randn([32, 3, 256,256])
+    # 模型加载，要指明回归的关键点个数
+    model = resnet50(pretrained=False, landmarks_num=196, img_size=256)
+    # 将数据送入网络中
+    landmarks,gender,age = model(input)
+    # 打印结果
+    print(landmarks.size(),gender.size(),age.size())
+```
+
+输出结果为
+
+```python
+torch.Size([32, 196]) torch.Size([32, 2]) torch.Size([32, 1])
+```
+
+##### 2.3.3 模型训练
+
+这个模型的训练和我们的姿态模型训练是差不多的，文件目录在：facetoPay/face_euler_angle/train.py
+
+![](face-recognition\57.png)
+
+老样子，我们如果只在乎结果我们就只关注参数配置就可以
+
+```python
+parser = argparse.ArgumentParser(description=' Project Multi Task Train')
+    # 模型输出文件夹
+    parser.add_argument('--model_exp', type=str, default='./model_exp',
+                        help='model_exp')
+    # 模型类型
+    parser.add_argument('--model', type=str, default='resnet_34',
+                        help='model : resnet_34')
+    # landmarks 个数*2（每个关键点有x,y两个坐标）
+    parser.add_argument('--num_classes', type=int, default=196,
+                        help='num_classes')
+    # GPU选择
+    parser.add_argument('--GPUS', type=str, default='0',
+                        help='GPUS')
+    # 训练集标注信息
+    parser.add_argument('--train_path', type=str,
+                        default='../../datasets/wiki_crop_face_multi_task/label_new/',
+                        help='train_path')
+    # 初始化学习率
+    parser.add_argument('--pretrained', type=bool, default=True,
+                        help='imageNet_Pretrain')
+    # 模型微调
+    parser.add_argument('--fintune_model', type=str,
+                        default='none',
+                        help='fintune_model')
+    # 损失函数定义
+    parser.add_argument('--loss_define', type=str, default='wing_loss',
+                        help='define_loss')
+    # 初始化学习率
+    parser.add_argument('--init_lr', type=float, default=2e-4,
+                        help='init_learningRate')
+    # 学习率权重衰减率
+    parser.add_argument('--lr_decay', type=float, default=0.5,
+                        help='learningRate_decay')
+    # 优化器正则损失权重
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
+                        help='weight_decay')
+    # 训练每批次图像数量
+    parser.add_argument('--batch_size', type=int, default=2,
+                        help='batch_size')
+    # dropout
+    parser.add_argument('--dropout', type=float, default=0.5,
+                        help='dropout')
+    # 训练周期
+    parser.add_argument('--epochs', type=int, default=1,
+                        help='epochs')
+    # 训练数据生成器线程数
+    parser.add_argument('--num_workers', type=int, default=8,
+                        help='num_workers')
+    # 输入模型图片尺寸
+    parser.add_argument('--img_size', type=tuple, default=(256, 256),
+                        help='img_size')
+    # 训练数据生成器是否进行数据扩增
+    parser.add_argument('--flag_agu', type=bool, default=True,
+                        help='data_augmentation')
+    # 模型输出文件夹是否进行清除
+    parser.add_argument('--clear_model_exp', type=bool, default=False,
+                        help='clear_model_exp')
+
+    # --------------------------------------------------------------------------
+    args = parser.parse_args()  # 解析添加参数
+    # --------------------------------------------------------------------------
+    # 根据配置信息创建训练结果保存的根目录
+    # mkdir_的功能是：
+    # 存在路径时
+    # 若flag_rm = True，则删除文件重新创建
+    # 否则不修改
+    # 若不存在路劲，则创建路径即可
+    mkdir_(args.model_exp, flag_rm=args.clear_model_exp)
+    loc_time = time.localtime()
+    args.model_exp = args.model_exp + '/' + time.strftime("%Y-%m-%d_%H-%M-%S", loc_time) + '/'
+    # 根据训练时间创建保存结果的路经
+    mkdir_(args.model_exp, flag_rm=args.clear_model_exp)
+    # parse_args()方法的返回值为namespace，用vars()内建函数化为字典
+    unparsed = vars(args)
+    # 打印参数结果
+    for key in unparsed.keys():
+        print('{} : {}'.format(key, unparsed[key]))
+    # 当前时间
+    unparsed['time'] = time.strftime("%Y-%m-%d %H:%M:%S", loc_time)
+    # 将配置信息写入到文件照中
+    fs = open(args.model_exp + 'train_ops.json', "w", encoding='utf-8')
+    # 将配置信息写入到json文件中
+    json.dump(unparsed, fs, ensure_ascii=False, indent=1)
+    fs.close()
+    # 模型训练
+    trainer(ops=args)
+    print('well done : {}'.format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())))
+```
+
+我们将配置信息打印出来是这样的
+
+```python
+model_exp : ./model_exp/2021-05-18_09-05-15/
+model : resnet_34
+num_classes : 196
+GPUS : 0
+train_path : /models/yaoxiaoying/datasets/wiki_crop_face_multi_task/label_new/
+pretrained : True
+fintune_model : /models/yaoxiaoying/facetoPay/dpcas/wyw2smodels/face_multitask-resnet_34_imgsize-256-20210425.pth
+loss_define : wing_loss
+init_lr : 0.0002
+lr_decay : 0.5
+weight_decay : 0.0005
+momentum : 0.9
+batch_size : 96
+dropout : 0.5
+epochs : 5
+num_workers : 8
+img_size : (256, 256)
+flag_agu : True
+clear_model_exp : False
+use model : resnet_34
+```
+
+**接着就是开始训练**
+
+1. 数据加载
+2. 模型加载
+3. 模型训练
+
+**数据加载**
+
+```python
+# 数据加载
+    dataset = LoadImagesAndLabels(ops=ops, img_size=ops.img_size, flag_agu=ops.flag_agu)
+    print('len train datasets : %s' % (dataset.__len__()))
+    # Dataloader获取batchsize的数据
+    dataloader = DataLoader(dataset,
+                            batch_size=ops.batch_size,
+                            num_workers=ops.num_workers,
+                            shuffle=True)
+```
+
+**模型加载**
+
+首先是模型结果初始化，将模型写入设备
+
+```python
+# 模型加载
+    if ops.model == 'resnet_50':
+        model_ = resnet50(pretrained=False, landmarks_num=ops.num_classes, img_size=ops.img_size[0],
+                          dropout_factor=ops.dropout)
+    elif ops.model == 'resnet_34':
+        model_ = resnet34(pretrained=False, landmarks_num=ops.num_classes, img_size=ops.img_size[0],
+                          dropout_factor=ops.dropout)
+    elif ops.model == 'resnet_18':
+        model_ = resnet18(pretrained=False, landmarks_num=ops.num_classes, img_size=ops.img_size[0],
+                          dropout_factor=ops.dropout)
+    # 若有GPU使用GPU进行训练
+    use_cuda = torch.cuda.is_available()
+    # 否则使用CPU
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    # 将网络写入设备中
+    model_ = model_.to(device)
+```
+
+接着就是加载预训练模型了
+
+```python
+# 加载预训练模型
+    if os.access(ops.fintune_model, os.F_OK):  # checkpoint
+        chkpt = torch.load(ops.fintune_model, map_location=device)
+        model_.load_state_dict(chkpt)
+        print('load fintune model : {}'.format(ops.fintune_model))
+```
+
+**模型训练**
+
+- 第一步：优化器，损失函数等相关信息的设置
+- 第二步：遍历epoch进行网络训练
+- 第三步：遍历每个batch的数据，进行预测，计算损失函数，进行反向传播
+- 第四步：保存ckpt
+- 第五步：损失变化曲线的绘制
+
+优化器，损失函数等相关信息的设置
+
+```python
+ # 优化器设计
+    optimizer = torch.optim.Adam(model_.parameters(), lr=ops.init_lr, betas=(0.9, 0.99),
+                                      weight_decay=ops.weight_decay)
+
+    # 损失函数：用于计算年龄和关键点
+    if ops.loss_define != 'wing_loss':
+        criterion = nn.MSELoss(reduce=True, reduction='mean')
+    # 交叉熵损失函数：softmax+损失的组合
+    criterion_gender = nn.CrossEntropyLoss()
+    # 学习率
+    init_lr = ops.init_lr
+    # 初始化损失，将损失添加到列表中用于绘制训练曲线
+    pts_loss = []
+    gender_loss = []
+    age_loss = []
+    sum_loss=[]
+```
+
+遍历每个epoch开始进行训练
+
+```python
+# 遍历每个epoch进行训练
+    for epoch in range(0, ops.epochs):
+        # 模型训练开始
+        model_.train()
+        # 损失均值
+        loss_mean = 0. 
+         # 损失计算计数器
+        loss_idx = 0. 
+```
+
+遍历batch中的数据，进行预测，计算损失函数，并打印训练结果，进行反向传播
+
+```python
+# 遍历每个batch中的数据
+        for i, (imgs_, pts_, gender_, age_) in enumerate(dataloader):
+            # 将数据写入设备中
+            if use_cuda:
+                imgs_ = imgs_.cuda()
+                pts_ = pts_.cuda()
+                gender_ = gender_.cuda()
+                age_ = age_.cuda()
+            # 将图像送入网络中，进行预测
+            output_landmarks, output_gender, output_age = model_(imgs_.float())
+            # 计算年龄和关键点的损失
+            if ops.loss_define == 'wing_loss':
+                loss_pts = got_total_wing_loss(output_landmarks, pts_.float())
+                loss_age = got_total_wing_loss(output_age, age_.float())
+            else:
+                loss_pts = criterion(output_landmarks, pts_.float())
+                loss_age = criterion(output_age, age_.float())
+            # 计算性别的损失
+            loss_gender = criterion_gender(output_gender, gender_)
+            pts_loss.append(loss_pts)
+            age_loss.append(loss_age)
+            gender_loss.append(loss_gender)
+            # 多任务损失:不同任务的损失的权重是不一样的，相对较难的任务权重较大
+            loss = loss_pts + 0.3 * loss_age + 0.25 * loss_gender
+            sum_loss.append(loss)
+            # 求损失均值
+            loss_mean += loss.item()
+            # 计数加1
+            loss_idx += 1.
+            # 每10个batch打印一次结果
+            if i % 1 == 0:
+                loc_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                print('  %s - %s - epoch [%s/%s] (%s/%s):' % (
+                    loc_time, ops.model, epoch, ops.epochs, i, int(dataset.__len__() / ops.batch_size)), \
+                      'Mean Loss : %.6f - Loss: %.6f' % (loss_mean / loss_idx, loss.item()), \
+                      " loss_pts:{:.4f},loss_age:{:.4f},loss_gender:{:.4f}".format(loss_pts.item(), loss_age.item(),
+                                                                                   loss_gender.item()), \
+                      ' lr : %.5f' % init_lr, ' bs:', ops.batch_size, \
+                      ' img_size: %s x %s' % (ops.img_size[0], ops.img_size[1]))
+            # 计算梯度
+            loss.backward()
+            # 优化器对模型参数更新
+            optimizer.step()
+            # 优化器梯度清零
+            optimizer.zero_grad()
+```
+
+保存ckp
+
+```python
+# 每3个epoch保存一次训练结果
+if epoch % 3 == 0:
+    torch.save(model_.state_dict(), ops.model_exp + '{}_epoch-{}.pth'.format(ops.model, epoch))
+```
+
+损失变化曲线的绘制，在这里我们要绘制关键点，年龄，性别以及总损失的损失变化曲线
+
+```python
+# 创建第一张画布
+    plt.figure(0)
+    # 绘制pts损失曲线
+    plt.plot(pts_loss, label="pts Loss")
+    # 绘制性别损失曲线 , 颜色为红色
+    plt.plot(gender_loss, color="red", label="gender Loss")
+    # 绘制年龄损失曲线 , 颜色为绿色
+    plt.plot(age_loss, color="green", label="age Loss")
+    # 绘制总损失曲线 , 颜色为蓝色
+    plt.plot(sum_loss, color="blue", label="sum Loss")
+    # 曲线说明在左上方
+    plt.legend(loc='upper left')
+    # 保存图片
+    plt.savefig("./loss.png")
+```
+
+![](face-recognition\58.png)
+
+##### 2.3.4 模型推理
+
+这个的流程也是非常的简单
+
+![](face-recognition\59.png)
+
+该类的代码目录在：facetoPay/face_multi_task/inference.py
+
+![](face-recognition\57.png)
+
+**1.配置信息的解析**
+
+```python
+parser = argparse.ArgumentParser(description=' Project Landmarks Test')
+    # 模型路径
+    parser.add_argument('--test_model', type=str,
+                        default='/models/yaoxiaoying/facetoPay/dpcas/wyw2smodels/face_multitask-resnet_34_imgsize-256-20210425.pth',
+                        help='test_model')
+    # 模型类型
+    parser.add_argument('--model', type=str, default='resnet_34',
+                        help='model : resnet_50')
+    # 输出数据（关键点）的个数
+    parser.add_argument('--num_classes', type=int, default=196,
+                        help='num_classes')
+    # GPU选择
+    parser.add_argument('--GPUS', type=str, default='0',
+                        help='GPUS')
+    # 测试集路径
+    parser.add_argument('--test_path', type=str,
+                        default='/models/yaoxiaoying/facetoPay/face_multi_task/img/',
+                        help='test_path')
+    # 输入模型图片尺寸
+    parser.add_argument('--img_size', type=tuple, default=(256, 256),
+                        help='img_size')
+    # 是否可视化图片
+    parser.add_argument('--vis', type=bool, default=True,
+                        help='vis')
+    ops = parser.parse_args()  # 解析添加参数
+    # parse_args()方法的返回值为namespace，用vars()内建函数化为字典
+    unparsed = vars(ops)
+    for key in unparsed.keys():
+        print('{} : {}'.format(key, unparsed[key]))
+    # 设备信息
+    os.environ['CUDA_VISIBLE_DEVICES'] = ops.GPUS
+    # 测试图片文件夹路径
+    test_path = ops.test_path
+```
+
+输出结果：
+
+```python
+test_model : /models/yaoxiaoying/facetoPay/dpcas/wyw2smodels/face_multitask-resnet_34_imgsize-256-20210425.pth
+model : resnet_34
+num_classes : 196
+GPUS : 0
+test_path : /models/yaoxiaoying/facetoPay/face_multi_task/img/
+img_size : (256, 256)
+use model : resnet_34
+```
+
+**2.模型加载**
+
+构建模型
+
+```python
+    # 加载模型
+    if ops.model == 'resnet_50':
+        model_ = resnet50(landmarks_num=ops.num_classes, img_size=ops.img_size[0])
+    elif ops.model == 'resnet_34':
+        model_ = resnet34(landmarks_num=ops.num_classes, img_size=ops.img_size[0])
+```
+
+获取设备信息，并将模型写入设备中，并指定为前向推断模式
+
+```python
+# 设备设置
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    model_ = model_.to(device)
+    # 设置为前向推断模式
+    model_.eval()
+```
+
+加载预训练模型
+
+```python
+# 加载训练好的模型
+    if os.access(ops.test_model, os.F_OK):
+        chkpt = torch.load(ops.test_model, map_location=device)
+        model_.load_state_dict(chkpt)
+        print('load test model : {}'.format(ops.test_model))
+```
+
+**模型预测**
+
+![](face-recognition\60.png)
+
+#### 2.4 人脸识别
+
+这个我们主要的流程是这样：人脸检测 => 人脸矫正 => 人脸识别
+
+![](face-recognition\61.png)
+
+人脸识别系统的应用场景非常广泛，比如常见的考勤系统，门禁系统，刷脸支付等
+
+![](face-recognition\62.png)
+
+##### 2.4.0 方法讨论
+
+我们人脸识别有两种
+
+1. 1对1人脸识别（这个是首先我们先确认用户信息再进行人脸特征向量的比对，这个常在已有的条件而出现的业务，比如用户是有登录信息的或者使用高铁的人脸识别需要先将身份证放上面后再进行验证人脸）
+2. 1对N人脸识别（这个主要是针对数据集不大的业务场景，比如学校或者一些公司的考勤系统，这些是需要和数据库的所有人脸进行一一比对的，不过呢也有优化手段，首先就是维度，比如我们的特征向量是512维的，我们就可以以前10维的相似度来作为过滤排序条件）
+
+**1:1人脸识别**
+
+通过提取两张人脸的特征进行相似度对比，最终返回相应的置信度得分，根据特征匹配程度决定“拒绝”或者“接受”。用于判断两个输入人脸是否属于同一人，适用于身份识别及相似脸查询等应用查询
+
+![](face-recognition\63.png)
+
+**1:N人脸识别**
+
+在大规模人脸数据库中找出与待检索人脸相似度最高的一个或多个人脸。通过创建的待查人员的面部特征，可以在人脸数据库中迅速查找，可用于身份确认以及身份查询等应用场景
+
+![](face-recognition\64.png)
+
+实现方法很简单，就是使用我们的深度学校算法来进行特征提取
+
+而这里我们的 **损失函数设计**是基于 **FAR和FRR**
+
+![](face-recognition\65.png)
+
+##### 2.4.1 数据加载
+
+这里的数据已经是人脸框处理后的结果了（就是说前面我们需要将人脸检测，人脸姿态的模型训练好，将他们处理的结果/数据传到这个模型进行人脸识别）
+
+首先我们需要了解数据格式，因为我们这里是人脸识别，所以目的就是找到数据对应的标签，所以我们这里的数据和标签如下
+
+![](face-recognition\66.png)
+
+这个目录在：datasets/insight_face
+
+![](face-recognition\67.png)
+
+接着是我们数据加载的代码，目录在：facetoPay/insight_face/data/data_pipe.py
+
+![](face-recognition\68.png)
+
+**当然，我们还是不会少了数据增强这个步骤的**
+
+```python
+# 获取训练集数据
+def get_train_dataset(imgs_folder):
+    # 水平翻转，标准化组合在一起
+    train_transform = trans.Compose([
+        trans.RandomHorizontalFlip(),
+        trans.ToTensor(),
+        trans.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
+    # 一个通用的数据加载器,默认你的数据集已经自觉按照要分配的类型分成了不同的文件夹，
+    # 一种类型的文件夹下面只存放一种类型的图片
+    ds = ImageFolder(imgs_folder, train_transform)
+    # 类别个数
+    class_num = len(ds.classes)
+    return ds, class_num
+```
+
+**接着就是我们数据的测试了**
+
+```python
+from config import get_config
+    # 获取参数配置信息
+    conf = get_config()
+    # 设置数据的路径
+    conf.datasets_train_path = "/Users/yaoxiaoying/Desktop/人脸支付/02.code/datasets/insight_face"
+    # 获取送入网络中的数据
+    data_loader, class_num, datasets_len = get_train_loader(conf)
+    # 打印数据数量和类别个数
+    print("train datasets len : {}".format(datasets_len))
+    print(" class_num:{} ".format(class_num))
+    # 遍历数据进行展示
+    for i, (imgs, labels) in enumerate(data_loader):
+        # 遍历每个batch中的每一副图像进行展示
+        for j in range(conf.batch_size):
+            # 展示
+            cv2.imshow('results', np.uint8(de_preprocess(imgs[j].permute(1, 2, 0))*255.0)[:, :, ::-1])
+            cv2.waitKey(0)
+            # 打印相应的目标值
+            print(labels[j])
+    cv2.destroyAllWindows()
+```
+
+输出结果：
+
+```python
+train datasets len : 68322
+ class_num:1021 
+```
+
+![](face-recognition\69.png)
+
+##### 2.4.2 模型构建（ResNet）
+
+在模型构建之前，首先是需要了解我们网络结构的使用
+
+![](face-recognition\70.png)
+
+- 首先就是我们需要构建一个可以输出多维特征向量的输出层（常见的舒展层）
+- 接着我们在验证的时候可以理解成同一类别下不同数据进行模型验证出的特征向量之间进行比较差异（同类希望差距小一点，不同希望差距大一点，这个可以通过损失函数和正则化进行处理）
+- 这里我们使用的距离度量网络叫做 arcface（也叫做欧拉距离，也是本模型的损失函数）
+
+**所以我们的网络结构是两个部分组成的**
+
+- 骨干网络
+- 距离度量
+
+**骨干网络**
+
+这个就是深度网络需要做的事情（特征提取）
+
+![](face-recognition\71.png)
+
+**我们可以对残缺块进行改进**
+
+1. 一种是bottleneck_IR（就是感受野的变化和1激活函数的变化）
+2. 一种是bottleneck_IR_SE
+
+**bottleneck_IR**
+
+该模块采用 BN-Conv-BN-PReLu-Conv-BN 结构作为残差块，并在残差块中将第一个卷积层的步长从2调整到1，激活函数采用PReLu替代了原来的ReLu。采用修改过的残差块的模型在后面添加了“IR”以作为标识
+
+![](face-recognition\72.png)
+
+```python
+# resnet中残差块的包含3个BN层
+class bottleneck_IR(Module):
+    def __init__(self, in_channel, depth, stride):
+        """
+        :param in_channel: 输入通道数
+        :param depth: 输出通道数
+        :param stride: 步长
+        """
+        super(bottleneck_IR, self).__init__()
+        # 短连接部分
+        if in_channel == depth:
+            self.shortcut_layer = MaxPool2d(1, stride)
+        else:
+            self.shortcut_layer = Sequential(
+                Conv2d(in_channel, depth, (1, 1), stride, bias=False), BatchNorm2d(depth))
+        # 残差部分构成
+        self.res_layer = Sequential(
+            BatchNorm2d(in_channel),
+            Conv2d(in_channel, depth, (3, 3), (1, 1), 1, bias=False), PReLU(depth),
+            Conv2d(depth, depth, (3, 3), stride, 1, bias=False), BatchNorm2d(depth))
+    # 前向传播过程
+    def forward(self, x):
+        shortcut = self.shortcut_layer(x)
+        res = self.res_layer(x)
+        return res + shortcut
+```
+
+**bottleneck_IR_SE**
+
+![](face-recognition\73.png)
+
+方框旁边的维度信息代表该层的输出。这里我们使用全局平均池化作为降维操作。紧接着两个FC层(**全连接层**)（注意：代码实现使用的是1x1的卷积）去建模通道间的相关性，并输出和输入特征同样数目的权重。我们首先将特征维度降低到输入的1/16，然后经过ReLu激活后再通过一个FC层升回到原来的维度。这样做比直接用一个FC层的好处在于：1）具有更多的非线性，可以更好地拟合通道间复杂的相关性；2）极大地减少了参数量和计算量。然后通过一个Sigmoid的门获得0~1之间归一化的权重，最后通过一个Scale（**将权重系数与原始特征图逐通道相乘，实现对重要特征的强化、次要特征的抑制，让网络更关注关键信息**）的操作来将归一化后的权重加权到每个通道的特征上。（**Residedual就是残差操作**）
+
+```python
+# 瓶颈模块添加SE模块
+class bottleneck_IR_SE(Module):
+    def __init__(self, in_channel, depth, stride):
+        super(bottleneck_IR_SE, self).__init__()
+        # 短连接部分
+        if in_channel == depth:
+            self.shortcut_layer = MaxPool2d(1, stride)
+        else:
+            self.shortcut_layer = Sequential(
+                Conv2d(in_channel, depth, (1, 1), stride, bias=False),
+                BatchNorm2d(depth))
+        # 残差部分加入se模块
+        self.res_layer = Sequential(
+            BatchNorm2d(in_channel),
+            Conv2d(in_channel, depth, (3, 3), (1, 1), 1, bias=False),
+            PReLU(depth),
+            Conv2d(depth, depth, (3, 3), stride, 1, bias=False),
+            BatchNorm2d(depth),
+            SEModule(depth, 16)
+        )
+    # 前向传播过程
+    def forward(self, x):
+        shortcut = self.shortcut_layer(x)
+        res = self.res_layer(x)
+        return res + shortcut
+```
+
+**那我们的模型构建如下**
+
+```python
+# 构建残差网络
+class Backbone(Module):
+    def __init__(self, num_layers, drop_ratio, mode='ir'):
+        """
+        :param num_layers: 网络层数
+        :param drop_ratio: 随机失活比例
+        :param mode: 是否添加se模块
+        """
+        super(Backbone, self).__init__()
+        assert num_layers in [50, 100, 152], 'num_layers should be 50,100, or 152'
+        assert mode in ['ir', 'ir_se'], 'mode should be ir or ir_se'
+        # 获取网络的残差模块
+        blocks = get_blocks(num_layers)
+        # reset中残差块设计
+        if mode == 'ir':
+            unit_module = bottleneck_IR
+        elif mode == 'ir_se':
+            unit_module = bottleneck_IR_SE
+        # 网络输入层
+        self.input_layer = Sequential(Conv2d(3, 64, (3, 3), 1, 1, bias=False),
+                                      BatchNorm2d(64),
+                                      PReLU(64))
+        # 网络输出层
+        self.output_layer = Sequential(BatchNorm2d(512),
+                                       Dropout(drop_ratio),
+                                       Flatten(),
+                                       Linear(512 * 7 * 7, 512),
+                                       BatchNorm1d(512))
+        # 残差模块部分
+        modules = []
+        for block in blocks:
+            for bottleneck in block:
+                modules.append(
+                    unit_module(bottleneck.in_channel,
+                                bottleneck.depth,
+                                bottleneck.stride))
+        self.body = Sequential(*modules)
+    # 前向传播
+    def forward(self, x):
+        x = self.input_layer(x)
+        x = self.body(x)
+        x = self.output_layer(x)
+        return l2_norm(x)
+```
+
+**度量距离**（这里我们使用的是 arcface）
+
+距离度量的发展如下图所示：红、绿、蓝、黄分别代表基于softmax的深度方法、基于欧式距离的损失方法、基于softmax变种的方法、基于角/余弦的间隔损失方法
+
+![](face-recognition\74.png)
+
+所以，arcface即是我们选择的度量距离，也是我们选择损失函数
+
+![](face-recognition\75.png)
+
+```python
+class Arcface(Module):
+    # implementation of additive margin softmax loss in https://arxiv.org/abs/1704.06369
+    def __init__(self, embedding_size=512, classnum=51332, s=64., m=0.5):
+        """
+        :param embedding_size: 人脸图像的特征向量
+        :param classnum: 人脸分类数，人的个数
+        :param s: 半径
+        :param m: 夹角差值
+        """
+        super(Arcface, self).__init__()
+        # 类别个数
+        self.classnum = classnum
+        # 初始化
+        self.kernel = Parameter(torch.Tensor(embedding_size, classnum))
+        self.kernel.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
+        # 夹角差值，默认是0，5
+        self.m = m
+        # 半径，默认是64
+        self.s = s
+        # 夹角差值的cos和sin
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        # consface的参数
+        self.mm = self.sin_m * m 
+        # 阈值，避免theta + m >= pi
+        self.threshold = math.cos(math.pi - m)
+    def forward(self, embbedings, label):
+        # 权重的规范化
+        nB = len(embbedings)
+        kernel_norm = l2_norm(self.kernel, axis=0)
+        # 将特征向量与权重相乘，获取cos值
+        cos_theta = torch.mm(embbedings, kernel_norm)
+        # 将数值固定在[-1,1]之间，是稳定性更高
+        cos_theta = cos_theta.clamp(-1, 1)
+        # 求平方
+        cos_theta_2 = torch.pow(cos_theta, 2)
+        # 获取sin值
+        sin_theta_2 = 1 - cos_theta_2
+        sin_theta = torch.sqrt(sin_theta_2)
+        # cos(theta+t)
+        cos_theta_m = (cos_theta * self.cos_m - sin_theta * self.sin_m)
+        # cos(theta)-t
+        cond_v = cos_theta - self.threshold
+        # 获取cos(theta)-t小于0的位置，mask设为1
+        cond_mask = cond_v <= 0
+        # 对于cos(theta)-t小于0的位置，也就是theta不在（0，pi）之间，使用下式来替代
+        keep_val = (cos_theta - self.mm)  # when theta not in [0,pi], use cosface instead
+        cos_theta_m[cond_mask] = keep_val[cond_mask]
+        output = cos_theta * 1.0  # a little bit hacky way to prevent in_place operation on cos_theta
+        # 获取类别的索引值
+        idx_ = torch.arange(0, nB, dtype=torch.long)
+        # label是真实值
+        output[idx_, label] = cos_theta_m[idx_, label]
+        # 乘以s
+        output *= self.s
+        return output
+```
+
+
+
+##### 2.4.3 模型训练
+
+该代码目录在：facetoPay/insight_face/train.py。核心功能通过 trainer方法实现
+
+**配置信息**
+
+```python
+def get_config():
+    conf = edict()
+    # 训练的轮次
+    conf.epochs = 2
+    # 工作目录：
+    conf.work_path = "./"
+    # 微调模型的存储位置
+    conf.finetune_backbone_model = ""
+    conf.finetune_head_model = ""
+    # 训练集路径
+    conf.datasets_train_path = "../../datasets/insight_face"
+    # 模型结果保存位置
+    conf.save_path = conf.work_path + 'save'
+    # 图像大小
+    conf.input_size = [112,112]
+    # 特征向量的大小
+    conf.embedding_size = 512
+    # 网络深度
+    conf.net_depth = 50
+    # 随机失活的概率
+    conf.drop_ratio = 0.6
+    # 模型模式
+    conf.net_mode = 'ir_se' # or 'ir'
+    # 设备信息
+    conf.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # bacth大小
+    conf.batch_size = 2
+    # 学习率
+    conf.lr = 1e-3
+    # 步进式衰减的轮次
+    conf.milestones = [12,15,18]
+    # 动量
+    conf.momentum = 0.9
+    conf.num_workers = 6
+    # 损失函数
+    conf.ce_loss = CrossEntropyLoss()
+    return conf
+```
+
+**数据加载**
+
+```python
+# 加载训练集数据
+data_loader, class_num, datasets_len = get_train_loader(conf)
+```
+
+**模型加载**
+
+backbone模型结构初始化
+
+```python
+# 模型选择：backbone
+model_ = Backbone(conf.net_depth, conf.drop_ratio, conf.net_mode).to(conf.device)
+print('{}_{} model generated'.format(conf.net_mode, conf.net_depth))
+# 加载预训练模型:backbone
+if os.access(conf.finetune_backbone_model, os.F_OK):
+   model_.load_state_dict(torch.load(conf.finetune_backbone_model))
+```
+
+加载head部分的模型
+
+```python
+# 加载head模型，并添加预训练模型
+head_ = Arcface(embedding_size=conf.embedding_size, classnum=class_num).to(conf.device)
+if os.access(conf.finetune_head_model, os.F_OK):
+    head_.load_state_dict(torch.load(conf.finetune_head_model))
+    print("-------->>>   load head : {}".format(conf.finetune_head_model))
+```
+
+**接着就是我们的模型训练了**
+
+1. 优化器设置，使用SGD的优化方法
+2. 遍历每个轮次epoch，开始进行模型训练
+3. 遍历batch中的数据，进行反向传播更新参数即可
+4. 训练信息的打印，并进行模型权重的保存
+
+**优化器设置**
+
+```python
+# 获取网络中的不同层，用于进行网络优化
+paras_only_bn, paras_wo_bn = separate_bn_paras(model_)
+# 优化方法：weight_decay是正则化参数，将BN层分离出来不进行正则化
+optimizer = optim.SGD([
+        {'params': paras_wo_bn + [head_.kernel], 'weight_decay': 5e-4},
+        {'params': paras_only_bn}
+    ], lr=conf.lr, momentum=conf.momentum)
+```
+
+**遍历每个epoch开始进行训练**
+
+```python
+# 模型训练
+    model_.train()
+    # 迭代次数计数
+    step_ = 0
+    # 用来存放loss进行绘图
+    loss_list = []
+    # 遍历每一个epoch
+    for e in range(conf.epochs):
+        # 学习率衰减策略，变为原来的0.1倍
+        print("  epoch < {} >".format(e))
+        if e == conf.milestones[0]:
+            schedule_lr(optimizer)
+        if e == conf.milestones[1]:
+            schedule_lr(optimizer)
+        if e == conf.milestones[2]:
+            schedule_lr(optimizer)
+```
+
+**遍历batch中的数据，进行预测**
+
+```python
+# 遍历每一副图像
+for i, (imgs, labels) in enumerate(data_loader):
+    # 将数据写入设备中
+    imgs = imgs.to(conf.device)
+    labels = labels.to(conf.device)
+    optimizer.zero_grad()
+    # 使用backbone模型获取特征向量
+    embeddings = model_(imgs)
+    # 使用head获取网络输出
+    thetas = head_(embeddings, labels)
+    # 计算损失
+    loss = conf.ce_loss(thetas, labels)
+    # 将损失放入list中，绘图
+    loss_list.append(loss)
+    # 反向传播
+    loss.backward()
+    optimizer.step()
+```
+
+**训练信息的打印，并进行模型权重的保存**
+
+```python
+# 每10个迭代次数打印信息
+            if i % 10 == 0:
+                print(
+                    "  epoch - < {}/{} >, [{}/{}], loss: {:.6f} , bs: {}".format(
+                        e, conf.epochs, i, int(datasets_len / conf.batch_size), loss.item(),
+                        conf.batch_size))
+            # 每100个迭代次数保存checkpoint
+            if step_ % 100 == 0:
+                # 保存路径
+                save_path = conf.save_path
+                # 若不存在，则创建该路径
+                if not os.path.exists(save_path):
+                    os.mkdir(save_path)
+                # 获取当前时刻
+                time_str = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
+                # 保存backbone的结果
+                torch.save(
+                    model_.state_dict(), save_path +
+                                         ('/model_{}_step_{}.pth'.format(time_str, step_)))
+                # 保存head部分的结果
+                torch.save(
+                    head_.state_dict(), save_path +
+                                        ('/head_{}_step_{}.pth'.format(time_str, step_)))
+            # 迭代次数加1
+            step_ += 1
+```
+
+![](face-recognition\76.png)
+
+##### 2.4.4 模型推理
+
+这个不同于上面的模型内容，这里我们是需要搭建一个数据库来存储相关人脸信息才可以进行比对（**我们这里构建的是一对N**）
+
+1. 首先我们需要指定训练好的模型
+2. 接着我们需要处理图像，将每一张图像的特征向量都获取到
+3. 接着将特征向量写入 pth文件中，将对应的类别（文件名）写入 npy里面
+
+**具体实现**
+
+```python
+def prepare_facebank(path_images, facebank_path, model, device, tta=True):
+    '''
+    :param path_images:图像路径
+    :param facebank_path:保存的位置
+    :param model: 人脸特征提取使用的模型
+    :param device: 设备信息
+    :param tta: 是否获取镜像的特征
+    :return:
+    embeddings : torch.floattensor类型
+        n*512大小
+    names : list
+        n,保存每个人的姓名.
+    '''
+    # 将类型转换为tensor和标准化整合在一起进行
+    test_transform_ = trans.Compose([
+        trans.ToTensor(),
+        trans.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
+    # 模型只进行前向传播
+    model.eval()
+    # 用来存储每个人提取的特征
+    embeddings = []
+    # 用来存储每个人的名称，不存在的对象名称为Unknown
+    names = ['Unknown']
+    # 记录人（文件夹）的个数
+    idx = 0
+    # 遍历每个人的文件夹
+    for path in path_images.iterdir():
+        # 若是文件，则进行下一次的遍历
+        if path.is_file():
+            continue
+        else:
+            # 计数加1
+            idx += 1
+            # 存放某个对象的特征
+            embs = []
+            # 遍历文件夹中的所有图像
+            for file in path.iterdir():
+                # 若不是图像文件，则进行下一次的循环
+                if not file.is_file():
+                    continue
+                else:
+                    try:
+                        # 读取图像文件
+                        img = Image.open(file)
+                        print(" {}) {}".format(idx + 1, file))
+                    except:
+                        continue
+                    # 若图像尺寸不是112,则进行尺度的调整
+                    if img.size != (112, 112):
+                        try:
+                            img = img.resize((112, 112))
+                        except:
+                            continue
+                    # 模型预测
+                    with torch.no_grad():
+                        if tta:
+                            # 水平翻转
+                            mirror = trans.functional.hflip(img)
+                            # 原图像的预测
+                            emb = model(test_transform_(img).to(device).unsqueeze(0))
+                            # 镜像后图像的预测
+                            emb_mirror = model(test_transform_(mirror).to(device).unsqueeze(0))
+                            # 将特征求平均后放入embs中
+                            embs.append(l2_norm(emb + emb_mirror))
+                        else:
+                            # 获取原图像的特征，存入embs中
+                            embs.append(model(test_transform_(img).to(device).unsqueeze(0)))
+        if len(embs) == 0:
+            continue
+        # 对多幅图像的特征求平均
+        embedding = torch.cat(embs).mean(0, keepdim=True)
+        # 储存特征
+        embeddings.append(embedding)
+        # 储存对应的名称
+        names.append(path.name)
+    # 将特征添加到embeddings中
+    embeddings = torch.cat(embeddings)
+    # 姓名存储到names中
+    names = np.array(names)
+    # 将特征保存到pth文件中，将名称保存在names.npy文件中
+    torch.save(embeddings, facebank_path + '/facebank.pth')
+    np.save(facebank_path + '/names', names)
+    return embeddings, names
+```
+
+接下来配置相关的参数信息，加载训练好模型，调用上述方法即可构建人脸数据集，具体实现如下所示:
+
+```python
+# 参数配置
+parser = argparse.ArgumentParser(description='make facebank')
+# 模型
+parser.add_argument("--net_mode", help="which network, [ir, ir_se]",default='ir_se', type=str)
+# 网络深度
+parser.add_argument("--net_depth", help="how many layers [50,100,152]", default=50, type=int)
+# 预训练模型
+parser.add_argument("--finetune_backbone_model", help="finetune_backbone_model", default="/models/yaoxiaoying/models/wyw2smodels/face_verify-model_ir_se-50.pth", type=str)
+# 人脸仓库中的人脸图像
+parser.add_argument("--facebank_images_path", help="facebank_images_path", default="./facebank_images/", type=str)
+# 人脸仓库
+parser.add_argument("--facebank_path", help="facebank_path", default="./facebank/", type=str)
+# 是否翻转
+parser.add_argument("-tta", "--tta", help="whether test time augmentation",default=False,type=bool)
+
+args = parser.parse_args()
+# 设备信息
+device_ = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# 模型选择
+model_ = Backbone(args.net_depth, 1., args.net_mode).to(device_)
+print('{}_{} model generated'.format(args.net_mode, args.net_depth))
+# 加载预训练模型
+if os.access(args.finetune_backbone_model,os.F_OK):
+    model_.load_state_dict(torch.load(args.finetune_backbone_model))
+    print("-------->>>   load model : {}".format(args.finetune_backbone_model))
+# 模型预测
+model_.eval()
+# 创建人脸仓库
+targets, names = prepare_facebank(Path(args.facebank_images_path), args.facebank_path,model_ ,device_, tta = args.tta)
+```
+
+**而我们创建好的人脸仓库在**：facetoPay/insight_face/facebank
+
+![](face-recognition\77.png)
+
+**接着就是我们的人脸识别了/推理了**
+
+代码目录在：facetoPay/insight_face/face_verify.py。核心功能主要在 infer方法里面
+
+```python
+def infer(model, device, faces, target_embs, threshold=1.2, tta=False):
+    '''
+    :param model: 进行预测的模型
+    :param device: 设备信息
+    :param faces: 要处理的人脸图像
+    :param target_embs: 数据库中的人脸特征
+    :param threshold: 阈值
+    :param tta: 进行水平翻转的增强
+    :return:
+    '''
+    # 将类型转换和标准化合并在一起
+    test_transform = trans.Compose([
+        trans.ToTensor(),
+        trans.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
+
+    # 特征向量
+    embs = []
+    # 遍历人脸图像
+    for img in faces:
+        # 若进行翻转
+        if tta:
+            # 镜像翻转
+            mirror = trans.functional.hflip(img)
+            # 模型预测
+            emb = model(test_transform(img).to(device).unsqueeze(0))
+            emb_mirror = model(test_transform(mirror).to(device).unsqueeze(0))
+            # 获取最终的特征向量
+            embs.append(l2_norm(emb + emb_mirror))
+        else:
+            # 未进行翻转时，进行预测
+            embs.append(model(test_transform(img).to(device).unsqueeze(0)))
+    # 将特征拼接在一起
+    source_embs = torch.cat(embs)
+    # 计算要检测的图像特征与目标特征之间的差异
+    diff = source_embs.unsqueeze(-1) - target_embs.transpose(1, 0).unsqueeze(0)
+    dist = torch.sum(torch.pow(diff, 2), dim=1)
+    # 获取差异最小值及对应的索引
+    minimum, min_idx = torch.min(dist, dim=1)
+    # 若没有匹配成功，将索引设置为-1
+    min_idx[minimum > threshold] = -1
+
+    return min_idx, minimum
+```
+
+**老套路**
+
+- 第一步：参数信息的配置
+- 第二步：模型加载，并指定预测模式
+- 第三步：获取人脸仓库中人脸特征，及对应的人名
+- 第四步：遍历要处理的图像文件夹，提取图像的特征，与人脸仓库中的特征进行比较，完成人脸识别
+
+**配置信息**
+
+```python
+# 配置相关参数
+parser = argparse.ArgumentParser(description='make facebank')
+# 模型
+parser.add_argument("--net_mode", help="which network, [ir, ir_se]", default='ir_se', type=str)
+# 模型深度
+parser.add_argument("--net_depth", help="how many layers [50,100,152]", default=50, type=int)
+# 预训练模型
+parser.add_argument("--finetune_backbone_model", help="finetune_backbone_model",
+                    default="/models/yaoxiaoying/models/wyw2smodels/face_verify-model_ir_se-50.pth", type=str)
+# 人脸仓库中的图像
+parser.add_argument("--facebank_images_path", help="facebank_images_path",
+                    default="/models/yaoxiaoying/facetoPay/insight_face/facebank_images/", type=str)
+# 人脸仓库
+parser.add_argument("--facebank_path", help="facebank_path",
+                    default="/models/yaoxiaoying/facetoPay/insight_face/facebank", type=str)
+# 是否进行水平翻转
+parser.add_argument("-tta", "--tta", help="whether test time augmentation", default=False, type=bool)
+# 要进行识别的人脸
+parser.add_argument("-example", help="example", default="./example/", type=str)
+# 参数解析
+args = parser.parse_args()
+# 设备信息
+device_ = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+```
+
+**模型加载**
+
+```python
+# 模型选择
+model_ = Backbone(args.net_depth, 1., args.net_mode).to(device_)
+print('{}_{} model generated'.format(args.net_mode, args.net_depth))
+# 加载预训练模型
+if os.access(args.finetune_backbone_model, os.F_OK):
+    model_.load_state_dict(torch.load(args.finetune_backbone_model))
+    print("-------->>>   load model : {}".format(args.finetune_backbone_model))
+# 模型前向传播
+model_.eval()
+```
+
+**获取人脸仓库特征和标签**
+
+```python
+# 加载人脸仓库中的人脸特征及对应的名称
+targets, names = load_facebank(args.facebank_path)
+# 打印结果
+print("names : {}".format(names))
+print("targets size : {}".format(targets.size()))
+```
+
+**遍历要处理的图像文件夹，提取图像的特征，与人脸仓库中的特征进行比较，完成人脸识别**
+
+```python
+# 要识别的人脸
+faces_identify = []
+idx = 0
+# 遍历要处理的图像
+for file in os.listdir(args.example):
+    # 若非图片文件，进行下一次循环
+    if not file.endswith('jpg'):
+        continue
+    # 读取图像数据
+    img = cv2.imread(args.example + file)
+    # 获取图像的宽高
+    x, y = img.shape[0:2]
+    # 送入网络中的图像必须是112*112
+    if x != 112 or y != 112:
+        img = cv2.resize(img, (112, 112))
+    # 将数据放入list中
+    faces_identify.append(Image.fromarray(img))
+    # 进行检测，results是索引，face_dst是差异
+    results, face_dst = infer(model_, device_, faces_identify, targets, threshold=1.2, tta=False)
+    # 将其转换numpy的格式
+    face_dst = list(face_dst.cpu().detach().numpy())
+    # 获取姓名和差异的大小
+    print("{}) recognize：{} ,dst : {}".format(idx + 1, names[results[idx] + 1], face_dst[idx]))
+    # 将检测结果绘制在图像上
+    cv2.putText(img, names[results[idx] + 1], (2, 13), cv2.FONT_HERSHEY_DUPLEX, 0.5, (55, 0, 220), 5)
+    cv2.putText(img, names[results[idx] + 1], (2, 13), cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 50, 50), 1)
+
+    # cv2.namedWindow("imag_face",0)
+    # cv2.imshow("imag_face",img)
+    # cv2.waitKey(0)
+    # 将结果写入到文件中
+    cv2.imwrite(args.example + "results/" + file, img)
+    idx += 1
+# cv2.destroyAllWindows()
+```
+
+![](face-recognition\78.png)
+
+#### 2.5 系统集成
+
+在系统集成前，首先我们需要确定该系统的架构设计
+
+![](face-recognition\79.png)
+
+**支付系统执行流程**
+
+1. 首先通过摄像头将用户信息收集起来
+2. 接着分别通过  人脸检测（yolo）=> 人脸姿态 => 人脸相似性比对 => 人脸性别，年龄识别
+
+**我们整个系统代码文件**：facetoPay/dpcas
+
+![](face-recognition\80.png)
+
+**目录介绍**
+
+- application中是人脸支付的主要实现过程，包括人脸检测，人脸识别，检测结果展示的整体流程
+- Components是项目使用的深度学习模型的集合，包括人脸检测，人脸姿态估计，人脸多任务，人脸识别等，该部分内容与我们前面介绍的各个子模块是相对应的
+- wyw2smodels中是我们训练的模型结果
+- lib文件夹中是相关的支持库，包括cfg,cores,utils等文件夹，主要功能如下图所示：
+
+![](face-recognition\81.png)
+
+##### Componets目录
+
+Components中各个子模块的集合，包括人脸检测，人脸姿态估计，人脸多任务，人脸识别等，这一部分只包括模型架构，模型预测，不包含数据集和模型训练部分的内容的，如下图所示：
+
+![](D:\md\AI\face-recognition\82.png)
+
+**人脸检测**
+
+![](face-recognition\83.png)
+
+其中models中进行模型构建，utils中是一系列的工具文件，这两部分与人脸检测部分是一样的，预测时的主要内容是在文件：dpcas/components/face_detect_V5/yolo_V5_face.py
+
+**人脸姿态**
+
+![](face-recognition\84.png)
+
+其中network中进行模型构建，utils中是一系列的工具文件，这两部分与人脸姿态部分是一样的，预测时的主要内容是在文件：dpcas/components/face_euler_angle/face_euler_angle_component.py
+
+**人脸多任务**
+
+![](face-recognition\85.png)
+
+**人脸识别**
+
+![](face-recognition\86.png)
+
+##### wyw2smodels
+
+wyw2smodels主要存储了各个模型训练的参数权重，如下图所示：
+
+![](face-recognition\87.png)
+
+```python
+face_yolo_416-20210418.pt # 人脸检测模型
+
+euler_angle-resnet_18_imgsize_256.pth # 人脸姿态角 pitch yaw roll 模型
+
+face_multitask-resnet_34_imgsize-256-20210423.pth # 性别、年龄、关键点 模型
+
+face_verify-model_ir_se-50.pth  # 人脸识别特征抽取模型
+
+facebank/facebank.pth # 进行人脸识别的人脸数据库
+
+```
+
+##### facepay_lib
+
+lib文件夹中是相关的支持库，包括cfg,cores,utils等文件夹，其中make_face_bank_tools与人脸识别任务中是一样的，在这里不在赘述。goods中存储了商品图片，用于模拟购物过程；utils中是绘图工具；我们主要介绍cfg和cores中的内容
+
+![](face-recognition\88.png)
+
+**cfg配置文件**
+
+我们需要修改其中的配置，使其与本地的信息相匹配，如下所示
+
+```python
+# 人脸检测模型
+detect_model_path=./wyw2smodels/face_yoloV5_640.pt
+detect_input_size = 640 # 图像的大小
+detect_conf_thres=0.4 # 人脸检测置信度，高于该置信度进行输出
+detect_nms_thres=0.45 # 检测的nms阈值
+# 人脸识别模型
+face_verify_backbone_path=/models/yaoxiaoying/models/wyw2s/modelsface_verify-model_ir_se-50.pth
+facebank_path=/models/yaoxiaoying/facetoPay/dpcas/wyw2smodels/facebank# 人脸资源库地址
+face_verify_threshold=1.2 # 人脸匹配阈值设定，低于该设定阈值认为匹配成功
+# 人脸多任务检测模型
+face_multitask_model_path=/models/yaoxiaoying/models/wyw2smodels/face_multitask-resnet_34_imgsize-256-20210423.pth
+face_multitask_model_arch=resnet34
+# 人脸姿态检测模型
+face_euler_model_path=/models/yaoxiaoying/models/wyw2smodels/euler_angle-resnet_18_imgsize_256.pth
+```
+
+**cores**
+
+cores中主要是facepay_fuction.py文件，主要完成人脸区域扩展，人脸校正和人脸姿态，多任务的检测任务，接下来我们进行详细的介绍：
+
+**人脸校正**
+
+人脸校正也叫做人脸对齐，它根据图像中人脸的几何结构对图像进行仿射变换（旋转、缩放、平移等），将人脸变换到一个正脸的状态。人脸对齐是人脸识别的一个重要步骤，可以提升人脸识别的精度。 如下图所示：
+
+![](face-recognition\89.png)
+
+- 获取原始人脸图像中人脸区域左、右眼中心坐标
+- 计算原始人脸图像中左右眼中心坐标连线与水平方向的夹角θ
+- 计算原始人脸图像中左右两眼整体中心坐标，原始人脸图像与原始图像的尺度大小的比例获取旋转矩阵
+- 以左右两眼整体中心坐标为基点，将图片array逆时针旋转θ，并进行缩放，这样使两眼在一水平线上。
+- 正脸图像的两眼中心x坐标是图像的中心位置，y坐标是左眼y坐标，所以对上述图像进行平移后获取最终的结果
+
+![](face-recognition\90.png)
+
+```python
+# 人脸对齐过程
+def face_alignment(imgn, eye_left_n, eye_right_n, \
+                   desiredLeftEye=(0.34, 0.42), desiredFaceWidth=256, desiredFaceHeight=None):
+    """
+    :param imgn: 要进行校正的人脸图像
+    :param eye_left_n: 原始图像中的左眼中心
+    :param eye_right_n: 原始图像中的右眼中心
+    :param desiredLeftEye:目标图像中的左眼中心
+    :param desiredFaceWidth: 目标图像的人脸宽度
+    :param desiredFaceHeight: 目标图像的人脸高度
+    :return:
+    """
+    # 若人脸高度为空时，将其设置为人脸宽的大小
+    if desiredFaceHeight is None:
+        desiredFaceHeight = desiredFaceWidth
+    # 左右眼中心
+    leftEyeCenter = eye_left_n
+    rightEyeCenter = eye_right_n
+    # 计算两眼之间的距离
+    dY = rightEyeCenter[1] - leftEyeCenter[1]
+    dX = rightEyeCenter[0] - leftEyeCenter[0]
+    # 计算人眼的倾斜角度
+    angle = np.degrees(np.arctan2(dY, dX))
+
+    # 计算目标图像中的右眼的坐标
+    desiredRightEyeX = 1.0 - desiredLeftEye[0]
+    # 计算两眼之间的距离
+    dist = np.sqrt((dX ** 2) + (dY ** 2))
+    # 计算目标图像中左眼和右眼的距离
+    desiredDist = (desiredRightEyeX - desiredLeftEye[0])
+    desiredDist *= desiredFaceWidth
+    # 获取尺度变化
+    scale = desiredDist / dist
+    # 计算原图中两眼的中心位置
+    eyesCenter = ((leftEyeCenter[0] + rightEyeCenter[0]) / 2, (leftEyeCenter[1] + rightEyeCenter[1]) / 2)
+    # 计算以两眼中心为旋转中心的旋转矩阵
+    M = cv2.getRotationMatrix2D(eyesCenter, angle, scale)
+    # 计算矩阵中的平移项
+    tX = desiredFaceWidth * 0.5
+    tY = desiredFaceHeight * desiredLeftEye[1]
+    M[0, 2] += (tX - eyesCenter[0])
+    M[1, 2] += (tY - eyesCenter[1])
+    # 获取仿射变换后的宽高
+    (w, h) = (desiredFaceWidth, desiredFaceHeight)
+    # 仿射变换获取人脸对齐后的结果
+    output = cv2.warpAffine(imgn, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    return output
+```
+
+**人脸区域的扩展**
+
+```python
+# 扩展人脸框
+def refine_face_bbox(bbox, img_shape):
+    # 获取图像的高，宽
+    height, width, _ = img_shape
+    # 获取bbox的坐标
+    x1, y1, x2, y2 = bbox
+    # 获取宽高
+    expand_w = (x2 - x1)
+    expand_h = (y2 - y1)
+    # 对人脸区域进行扩展
+    x1 -= expand_w * 0.12
+    y1 -= expand_h * 0.12
+    x2 += expand_w * 0.12
+    y2 += expand_h * 0.12
+    # 量化
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    # 对超出图像区域的进行裁剪
+    x1 = np.clip(x1, 0, width - 1)
+    y1 = np.clip(y1, 0, height - 1)
+    x2 = np.clip(x2, 0, width - 1)
+    y2 = np.clip(y2, 0, height - 1)
+    # 返回扩展后的结果
+    return (x1, y1, x2, y2)
+```
+
+**人脸属性获取**
+
+人脸属性获取主要是进行人脸的性别，年龄，关键点，姿态的检测，获取相关的属性信息，该部分主要在方法get_faces_batch_attribute中实现，主要流程是：
+
+- 第一步：根据人脸检测的结果，获取每张图像（整幅图像）中的人脸区域的图像
+- 第二步：将人脸图像送入人脸姿态，多任务模型中，进行预测
+- 第三步：进行人脸校正，并过滤面积较小和姿态过大的人脸，返回符合条件的人脸
+
+第一步：根据人脸检测的结果，获取每张图像（整幅图像）中的人脸位置，并进行扩展后，裁剪出人脸部分的图像，并对人脸图像进行归一化，通道，类型等的调整
+
+```python
+def get_faces_batch_attribute(face_multitask_model, face_euler_model, dets, img_raw, use_cuda, face_size=256,
+                              vis=False):
+    """
+    :param face_multitask_model: 多任务模型
+    :param face_euler_model: 人脸姿态模型
+    :param dets: 人脸检测框
+    :param img_raw: 原始图像
+    :param use_cuda: 是否使用硬件conda
+    :param face_size: 人脸尺寸
+    :param vis: 是否进行显示
+    :return:
+    """
+    face_map = np.zeros([112 * 3, 112 * 3, 3]).astype(np.uint8)
+    face_map[:, :, 0].fill(205)
+    face_map[:, :, 1].fill(205)
+    face_map[:, :, 2].fill(205)
+    if len(dets) == 0:
+        return [], [], [], face_map
+    img_align = img_raw.copy()
+    # 绘制图像
+    image_batch = None
+    # 存放人脸框的位置
+    r_bboxes = []
+    # 存放裁剪的人脸区域
+    imgs_crop = []
+    # 遍历检测框
+    for b in dets:
+        # 构建list
+        b = list(map(int, b))
+        # 获取扩展后的结果
+        r_bbox = refine_face_bbox((b[0], b[1], b[2], b[3]), img_raw.shape)
+        # 将人脸框存入列表中
+        r_bboxes.append(r_bbox)
+        # 裁剪人脸区域
+        img_crop = img_raw[r_bbox[1]:r_bbox[3], r_bbox[0]:r_bbox[2]]
+        # 将人脸区域存入列表中
+        imgs_crop.append(img_crop)
+        # 将face的区域resize成256*256
+        img_ = cv2.resize(img_crop, (face_size, face_size), interpolation=cv2.INTER_LINEAR)  # INTER_LINEAR INTER_CUBIC
+        # 类型转换
+        img_ = img_.astype(np.float32)
+        # 归一化
+        img_ = (img_ - 128.) / 256.
+        # 将通道维放到前面
+        img_ = img_.transpose(2, 0, 1)
+        # 扩展图像数量维
+        img_ = np.expand_dims(img_, 0)
+        # 将图像添加到image_batch中
+        if image_batch is None:
+            image_batch = img_
+        else:
+            image_batch = np.concatenate((image_batch, img_), axis=0)
+```
+
+将上一步中获得的人脸图像送入人脸姿态，多任务模型中，进行预测，并将预测结果绘制在图像上
+
+```python
+ # 多任务：获取关键点，性别，年龄
+    landmarks_pre, gender_pre, age_pre = face_multitask_model.predict(image_batch)
+    # 获取人脸姿态
+    euler_angles = face_euler_model.predict(image_batch)
+    # 符合要求，需要识别的人脸图像
+    faces_identify = []
+    # 符合要求，需要识别的人脸边界框
+    faces_identify_bboxes = []
+    # 符合要求，需要识别的人脸索引计数器
+    faceid_idx = 0
+    # 遍历所有检测框的索引
+    for i in range(len(dets)):
+        # 获取左上角坐标
+        x0, y0 = r_bboxes[i][0], r_bboxes[i][1]
+        # 获取人脸的宽高
+        face_w = r_bboxes[i][2] - r_bboxes[i][0]
+        face_h = r_bboxes[i][3] - r_bboxes[i][1]
+        # 绘制人脸关键点，获取关键点字典，左右人眼中心，人脸面积
+        dict_landmarks, eyes_center, face_area = draw_landmarks(img_raw, landmarks_pre[i], face_w, face_h, x0, y0,
+                                                                vis=False)
+        # 概率最大类别索引
+        gender_max_index = np.argmax(gender_pre[i])
+        # 获取人脸姿态的角度
+        yaw, pitch, roll = euler_angles[i]
+        # 将角度绘制在图像上
+        cv2.putText(img_raw, "yaw:{:.1f},pitch:{:.1f},roll:{:.1f}".format(yaw, pitch, roll),
+                    (int(r_bboxes[i][0] - 20), int(r_bboxes[i][1] - 30)), cv2.FONT_HERSHEY_DUPLEX, 0.65, (253, 139, 54),
+                    5)
+        cv2.putText(img_raw, "yaw:{:.1f},pitch:{:.1f},roll:{:.1f}".format(yaw, pitch, roll),
+                    (int(r_bboxes[i][0] - 20), int(r_bboxes[i][1] - 30)), cv2.FONT_HERSHEY_DUPLEX, 0.65, (20, 185, 255),
+                    1)
+        # 将人脸面积绘制在图像上
+        cv2.putText(img_raw, "{}".format(int(face_area)), (int(r_bboxes[i][0] - 1), int(r_bboxes[i][3] - 3)),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.65, (253, 39, 54), 5)  # face_area
+        cv2.putText(img_raw, "{}".format(int(face_area)), (int(r_bboxes[i][0] - 1), int(r_bboxes[i][3] - 3)),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.65, (20, 185, 255), 1)
+        # 若性别索引为1，则为男性，否则为女性
+        if gender_max_index == 1.:
+            gender_str = "male"
+        else:
+            gender_str = "female"
+        # 绘制性别，年龄
+        plot_box(r_bboxes[i][0:4], img_raw, label="{}, age: {:.1f}".format(gender_str, age_pre[i][0]),
+                 color=(255, 90, 90), line_thickness=2)
+```
+
+对检测的人脸进行人脸校正，并过滤面积较小和姿态过大的人脸，将符合条件的人脸返回出来
+
+```python
+# 人脸对齐
+        if abs(yaw) < 45.:
+            face_align_output = face_alignment(img_align, eyes_center[0], eyes_center[1], desiredLeftEye=(0.365, 0.38),
+                                               desiredFaceWidth=112, desiredFaceHeight=None)
+        # 当人脸姿态是正面并且人脸面积大于60*60时，说明检测到人脸
+        if abs(yaw) < 36. and abs(pitch) < 36. and (face_area > (60 * 60)):
+            if vis:
+                draw_contour(img_raw, dict_landmarks, vis=True)
+            # 获取识别的人脸和区域
+            faces_identify.append(Image.fromarray(face_align_output))
+            faces_identify_bboxes.append(r_bboxes[i][0:4])
+            # 一共可展示九张人脸
+            if faceid_idx < 9:
+                # 获取每张图像在展示区域的位置
+                y1_map, y2_map = int(faceid_idx / 3) * 112, (int(faceid_idx / 3) + 1) * 112
+                x1_map, x2_map = int(faceid_idx % 3) * 112, (int(faceid_idx % 3) + 1) * 112
+                # 将图像数据填充到face_map中
+                face_map[y1_map:y2_map, x1_map:x2_map, :] = face_align_output
+                # 绘制矩形框
+                cv2.rectangle(face_map, (int(x1_map), int(y1_map)), (int(x2_map), int(y2_map)), (55, 255, 255), 2)
+                faceid_idx += 1
+        # 若不满足条件则未检测到人脸
+        else:
+            cv2.putText(img_raw, "bad for face reco", (int(r_bboxes[i][0] - 1), int(r_bboxes[i][3] + 20)),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.65, (20, 15, 255), 4)
+            cv2.putText(img_raw, "bad for face reco", (int(r_bboxes[i][0] - 1), int(r_bboxes[i][3] + 20)),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.65, (220, 185, 25), 1)
+    # 返回进行人脸识别的人脸图像，人脸识别框， 扩展后的人脸区域，绘制人脸图像的map
+    return faces_identify, faces_identify_bboxes, r_bboxes, face_map
+```
+
+##### applications
+
+applications中是系统集成代码
+
+**主要的实现流程是**
+
+- 第一步：获取配置信息，加载预训练模型
+- 第二步：进行相关参数的设置
+- 第三步：获取视频流
+- 第四步：在每一帧图像上进行人脸检测，姿态，关键点等的检测，并进行人脸识别
+- 第五步：人脸支付任务结果的可视化
+
+**获取配置信息，加载预训练模型**
+
+```python
+def main_facePay(video_path, cfg_file):
+    """
+    :param video_path: 视频位置
+    :param cfg_file: 配置文件
+    :return:
+    """
+    # 获取配置信息
+    config = parse_data_cfg(cfg_file)
+    # 1.加载预训练模型         
+    # 人脸检测模型
+    face_detect_model = yolo_v5_face_model(conf_thres=float(config["detect_conf_thres"]),
+                                           nms_thres=float(config["detect_nms_thres"]),
+                                           weights=config["detect_model_path"],
+                                           img_size=float(config["detect_input_size"]),
+                                           )
+    # 人脸识别模型
+    face_verify_model =     insight_face_model(backbone_model_path=config["face_verify_backbone_path"],
+                                           facebank_path=config["facebank_path"],
+                                  threshold=float(config["face_verify_threshold"]))
+    # 人脸多任务模型
+    face_multitask_model = FaceMuitiTask_Model(model_path=config["face_multitask_model_path"],                                        model_arch=config["face_multitask_model_arch"])
+    # 人脸姿态模型
+    face_euler_model = FaceAngle_Model(model_path=config["face_euler_model_path"])
+```
+
+**进行相关参数的设置，包括：支付会员信息，商品信息，检测人脸与检测有效区域的交并比阈值，绘图颜色等**
+
+```python
+ # 随机设置不同的颜色进行绘图
+    p_colors = []
+    for i in range(len(face_verify_model.face_names)):
+        p_colors.append((random.randint(60, 255), random.randint(70, 255), random.randint(130, 255)))
+    # 遍历所有的商品
+    goods_sku = []
+    print("loading goods sku ...")
+    for f_ in os.listdir("./lib/facepay_lib/goods/"):
+        goods_sku.append("./lib/facepay_lib/goods/" + f_)
+        print("sku : ", f_.replace(".jpg", ""))
+    # 商品文件数据
+    goods_map = np.zeros([100 * 2, 100 * 12, 3]).astype(np.uint8)
+    # 购买商品列表
+    goods_buy_list = []
+    # 将数据进行初始化
+    goods_map[:, :, :] = (200, 200, 200)
+    # 交并比阈值
+    face_iou_thr = 0.8
+    # 是否开启人脸支付模式，实际中可能有其他的支付方式
+    FacePay_Pattern = True
+```
+
+**获取视频流，并读取每一帧图像，接下来的所有工作都是在该帧图像上进行处理的**
+
+```python
+# 获取视频文件流
+    cap = cv2.VideoCapture(video_path)
+    # 视频写入初始化
+    video_writer = None
+    # 帧计数
+    frame_idx = 0
+    # 视频流打开
+    while cap.isOpened():
+        # 读取帧图像
+        ret, img = cap.read()
+```
+
+**成功获取帧图像后的处理流程如下**
+
+```python
+# 读取成功
+        if ret:
+            # 帧计数加1
+            frame_idx += 1
+            # 获取副本
+            algo_image = img.copy()
+            # 检测人脸，获取人脸的边界框
+            faces_bbox = face_detect_model.predict(img, vis=True)
+            # 若检测到人脸
+            if len(faces_bbox) > 0:
+                # 获取确认的人脸检测结果及框，所有的检测框，人脸面积
+                faces_identify, faces_identify_bboxes, bboxes, face_map = get_faces_batch_attribute(
+                    face_multitask_model, face_euler_model, faces_bbox, algo_image, use_cuda=True, vis=True)
+
+                # 绘制人脸识别有效区域，有效区域是距边界150 60的区域
+                reco_edge_w = 150
+                reco_edge_h = 60
+                face_reco_area = (
+                    reco_edge_w, reco_edge_h, algo_image.shape[1] - reco_edge_w, algo_image.shape[0] - reco_edge_h)
+                cv2.rectangle(algo_image, (reco_edge_w, reco_edge_h),
+                              (algo_image.shape[1] - reco_edge_w, algo_image.shape[0] - reco_edge_h), (255, 55, 55), 6)
+                cv2.rectangle(algo_image, (reco_edge_w, reco_edge_h),
+                              (algo_image.shape[1] - reco_edge_w, algo_image.shape[0] - reco_edge_h), (95, 95, 255), 2)
+                cv2.putText(algo_image, "Face_Pay_Recognize_Area", (reco_edge_w, reco_edge_h - 5),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.6, (200, 200, 200), 8)
+                cv2.putText(algo_image, "Face_Pay_Recognize_Area", (reco_edge_w, reco_edge_h - 5),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.6, (250, 60, 60), 2)
+
+                # 若人脸识别的结果数量大于0
+                if len(faces_identify) > 0:
+                    # 进行人脸识别：返回人脸索引及距离
+                    results, face_dst = face_verify_model.predict(faces_identify)
+                    face_dst = list(face_dst.cpu().detach().numpy())
+                    # 遍历每一个检测结果
+                    for idx, bbox_ in enumerate(faces_identify_bboxes):
+                        # 计算检测结果与人脸识别有效区域之间的距离
+                        face_iou_ = compute_face_iou((bbox_[1], bbox_[0], bbox_[3], bbox_[2]),
+                                                     (face_reco_area[1], face_reco_area[0], face_reco_area[3],
+                                                      face_reco_area[2]))
+                        # 顾客进入人脸识别区域才进行识别
+                        if face_iou_ > face_iou_thr:
+                            # 将检测结果绘制在图像上
+                            cv2.putText(algo_image, face_verify_model.face_names[results[idx] + 1] + ": {:.2f}".format(
+                                face_dst[idx]), (bbox_[0], bbox_[1] + 27), cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 95, 220),
+                                        6)
+                            cv2.putText(algo_image, face_verify_model.face_names[results[idx] + 1] + ": {:.2f}".format(
+                                face_dst[idx]), (bbox_[0], bbox_[1] + 27), cv2.FONT_HERSHEY_DUPLEX, 0.9,
+                                        p_colors[results[idx] + 1], 2)
+            # 若没有检测结果则绘制空即可
+            else:
+                face_map = np.zeros([112 * 3, 112 * 3, 3]).astype(np.uint8)
+                face_map[:, :, 0].fill(205)
+                face_map[:, :, 1].fill(205)
+                face_map[:, :, 2].fill(205)
+                print(" ------ ")
+```
+
+**结果展示，包括人脸检测，姿态，多任务，商品等信息的展示，具体的内容如下图所示：**
+
+![](face-recognition\91.png)
+
+```python
+# 结果展示，绘制人脸支付的文字
+            if FacePay_Pattern == True:
+                cv2.putText(algo_image, "Face_Pay", (6, 36), cv2.FONT_HERSHEY_DUPLEX, 1.3, (200, 200, 200), 12)
+                cv2.putText(algo_image, "Face_Pay", (6, 36), cv2.FONT_HERSHEY_DUPLEX, 1.3, (255, 225, 20), 2)
+
+            # 人脸检测结果合并显示
+            face_map = cv2.resize(face_map, (algo_image.shape[0], algo_image.shape[0]))
+            algo_image = np.hstack((algo_image, face_map))
+            # 商品展示结果合并显示
+            goods_map_r = cv2.resize(goods_map, (algo_image.shape[1], 210))
+            algo_image = np.vstack((algo_image, goods_map_r))
+            # 可视化设备进行展示
+            cv2.namedWindow('Face_Pay', 0)
+            cv2.imshow('Face_Pay', algo_image)
+            # 若无可视化设备则将其写入到视频文件中
+            if video_writer is None:
+                loc_time = time.localtime()
+                time_str = time.strftime("%Y-%m-%d_%H-%M-%S", loc_time)
+                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+                video_writer = cv2.VideoWriter("recording_{}.mp4".format(time_str), fourcc, 12,
+                                               (algo_image.shape[1], algo_image.shape[0]))
+            video_writer.write(algo_image)
+        else:
+            break
+        # 视频刷新时间
+        key_id = cv2.waitKey(10)
+        if key_id == 27:
+            break
+        # 模拟商品交易环节
+        if len(goods_buy_list) < 23:
+            # 随机购买商品
+            goods_id = random.randint(0, len(goods_sku) - 1)
+            # 添加商品
+            goods_buy_list.append(goods_sku[goods_id])
+
+            # 渲染需要购买的商品，获取商品图片
+            img_goods = cv2.imread(goods_sku[goods_id])
+            # 图像缩放
+            img_goods = cv2.resize(img_goods, (100, 100))
+            # 获取索引
+            buy_idx = len(goods_buy_list) - 1
+            # 获取渲染位置
+            y1_map, y2_map = int(buy_idx / 12) * 100, (int(buy_idx / 12) + 1) * 100
+            x1_map, x2_map = int(buy_idx % 12) * 100, (int(buy_idx % 12) + 1) * 100
+            # 添加商品
+            goods_map[y1_map:y2_map, x1_map:x2_map, :] = img_goods
+            cv2.rectangle(goods_map, (int(x1_map), int(y1_map)), (int(x2_map), int(y2_map)), (55, 155, 255), 4)
+            cv2.rectangle(goods_map, (int(x1_map), int(y1_map)), (int(x2_map), int(y2_map)), (255, 55, 55), 2)
+    # 资源释放
+    cv2.destroyAllWindows()
+    video_writer.release()
+```
+
+##### mian
+
+要完成人脸支付，只需调用main_facepay方法即可。如下所示，我们只要修改视频路径即可。
+
+```python
+if __name__ == '__main__':
+    # 配置文件
+    cfg_file = "./lib/facepay_lib/cfg/facepay.cfg"
+    #加载 face pay 应用
+    from applications.FacePay_local_app import main_facePay 
+    # 加载 face pay  应用
+    main_facePay(video_path='zhangli.mp4', cfg_file = cfg_file) 
+    print(" well done ~")
+```
+
+### 3.关键点技术思考
+
+首先是我们项目里面的技术点
+
+#### 深度网络模型
+
+##### Yolo
+
+这个系列算法可以说是我学深度学习的第一个热点应用算法家族，在一些检测场景是非常常见和应用的。不过深度学习算法的解释性很低，所以在 **骨干网络和颈部网络设计里面我们无法很好解释为什么要这样设计**输出端一般都是9个预测框，一个网格有三个预测框。
+
+1. CBS模块（基础的网络模块，特征提取）
+2. Resunit模块（残差块，防止梯度消失，原始特征消失）
+3. CSP模块（重要的特征提取模块，探索更多特征，减少计算量，缓解梯度消失）
+4. SPPF模块（增加多角度特征提取，减少计算量）
+
+![](face-recognition\5.png)
+
+![](face-recognition\6.png)
+
+![](face-recognition\7.png)
+
+![](face-recognition\8.png)
+
+#### 人脸识别技术实现
+
+##### 1对N
+
+不得不说，毕竟是第一次学校这个业务，所以这个比较也显得啰嗦，不过呢，这个思路还是非常简单可以理清的
+
+1. 首先就是先使用深度网络对人脸数据进行训练
+2. 接着加载数据库的用户数据通过模型转成特征向量将数据保存起来
+3. 在预测或者使用的时候，不仅需要将模型加载进来，还需要将特征向量数据传进来进行比对
+
+**优缺点**
+
+- 1对N，在少量的数据还行
+- 拓实时展性差，当需要上传新的或者删除一些数据需要重新程序获得特征向量化的数据
+
+##### 1对1
+
+这个是我根据现有的代码背景进行的思考
+
+1. 首先就是先使用深度网络对人脸数据进行训练
+2. 接着我们结合一些管理系统，当用户进行相关交互的时候，通过唯一标识找到对应的图像/图像特征向量，接着开始和现在的图像/帧进行比对
+
+**优缺点**
+
+- 需要和一些管理系统一起搭建成一个完整的项目系统
+- 需要的资源更多和复杂
+
+### 4.关键点业务思考
+
+### 5.总结思想
